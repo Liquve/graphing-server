@@ -6,7 +6,9 @@
 #include "FailableHookResult.h"
 #include "GraphingMessageParser.h"
 
-using AuthenticationHook = std::function<FailableHookResult(const QString&, const QString&)>;
+using LoginHook = std::function<FailableHookResult(const QString&, const QString&)>;
+using RegistrationHook = std::function<FailableHookResult(const QString&, const QString&, const QString&, const QString&)>;
+using CalculateFunction = std::function<QString(int, int, int)>;
 
 // данный класс управляет TCP-сервером, реализующим протокол с тремя командами: reg, auth, func
 class TCPGraphingServerManager : public QObject
@@ -17,25 +19,32 @@ private:
     quint16 port;
 
     QTcpServer* server;
-    GraphingMessageParser* parser;
+    GraphingMessageParser parser;
 
+    QList<QTcpSocket*> clients;
     // TCP не передаёт "сообщения", а передаёт потоки данных, для выделения сообщений данные надо сначала накопить в буфере
     QHash<QTcpSocket*, QByteArray> buffers;
+    QHash<QTcpSocket*, bool> authStates;
 
-    AuthenticationHook loginHook;
-    AuthenticationHook registrationHook;
+    LoginHook loginHook;
+    RegistrationHook registrationHook;
+    CalculateFunction calculateFunction;
 
     QString getListenDescription();
-    QString getSocketDescrption(QTcpSocket& socket);
+    QString getSocketDescrption(QTcpSocket&);
+
+    void handleMessage(QTcpSocket*, GraphingMessage);
 public:
-    explicit TCPGraphingServerManager(QHostAddress address, quint16 port, QObject *parent = nullptr);
+
+    explicit TCPGraphingServerManager(QHostAddress, quint16, QObject *parent = nullptr);
     ~TCPGraphingServerManager();
+
+    void setLoginHook(LoginHook);
+    void setRegistrationHook(RegistrationHook);
+    void setCalculateFunction(CalculateFunction);
 
     void startServer();
     void stopServer();
-
-    void setLoginHook(AuthenticationHook hook);
-    void setRegistrationHook(AuthenticationHook hook);
 private slots:
     void onRemoteConnection();
 

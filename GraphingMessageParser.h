@@ -9,9 +9,9 @@ class GraphingMessageParser
 public:
     GraphingMessageParser() = default;
 
-    GraphingMessage parse(QString message);
+    GraphingMessage parse(QString);
 
-    static QString getMessageDescription(GraphingMessage message);
+    static QString getMessageDescription(GraphingMessage);
 };
 
 #endif // GRAPHINGMESSAGEPARSER_H

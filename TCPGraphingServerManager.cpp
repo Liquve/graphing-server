@@ -1,4 +1,5 @@
 #include "TCPGraphingServerManager.h"
+#include "GraphingErrorCode.h"
 #include "GraphingMessage.h"
 #include <QDebug>
 
@@ -11,17 +12,24 @@ TCPGraphingServerManager::TCPGraphingServerManager(
     this->address = address;
     this->port = port;
 
-    this->server = new QTcpServer(this);
-    this->parser = new GraphingMessageParser();
+    this->server = new QTcpServer(this); // мы родитель, освободится автоматически при вызове деструктора
 
     // устанавливаем обработчик нового соединения, функция будет вызвана в контексте этого объекта (this) при сигнале newConnection
     connect(this->server, &QTcpServer::newConnection, this, &TCPGraphingServerManager::onRemoteConnection);
 }
 
 TCPGraphingServerManager::~TCPGraphingServerManager() {
+    // закроем все соединения
+    for (QList<QTcpSocket*>::iterator it = this->clients.begin(); it != this->clients.end(); it++)
+    {
+        QTcpSocket* remoteClient = *it;
+
+        remoteClient->close();
+        remoteClient->deleteLater();
+    }
+
     // выключим сокет на всякий случай, если он неактивен ничего плохого не будет
     this->stopServer();
-    delete this->parser;
 }
 
 QString TCPGraphingServerManager::getListenDescription() {
@@ -30,6 +38,18 @@ QString TCPGraphingServerManager::getListenDescription() {
 
 QString TCPGraphingServerManager::getSocketDescrption(QTcpSocket& socket) {
     return QString("%1:%2").arg(socket.peerAddress().toString()).arg(socket.peerPort());
+}
+
+void TCPGraphingServerManager::setLoginHook(LoginHook hook) {
+    this->loginHook = hook;
+}
+
+void TCPGraphingServerManager::setRegistrationHook(RegistrationHook hook) {
+    this->registrationHook = hook;
+}
+
+void TCPGraphingServerManager::setCalculateFunction(CalculateFunction function) {
+    this->calculateFunction = function;
 }
 
 void TCPGraphingServerManager::startServer() {
@@ -62,18 +82,25 @@ void TCPGraphingServerManager::onRemoteConnection() {
         return;
     }
 
-    QTcpSocket* remoteClient = this->server->nextPendingConnection();
-    connect(remoteClient, &QAbstractSocket::disconnected, remoteClient, [this, remoteClient]() {
-        qInfo().noquote() << "[-] Disconnected" << this->getSocketDescrption(*remoteClient);
+    while (this->server->hasPendingConnections()) {
+        QTcpSocket* remoteClient = this->server->nextPendingConnection();
 
-        this->buffers.remove(remoteClient);
-        remoteClient->deleteLater();
-    }); // лямбда это анонимная функция, мы передаём обработчик в виде лямбды, и захватываем в неё this и remoteClient (будем их использовать)
-    connect(remoteClient, &QIODevice::readyRead, this, &TCPGraphingServerManager::onRemoteDataChunk);
-    this->buffers[remoteClient] = QByteArray();
+        this->clients.append(remoteClient);
 
-    QString remoteClientDescription = QString("%1:%2").arg(remoteClient->peerAddress().toString()).arg(remoteClient->peerPort());
-    qInfo().noquote() << "[+] New connection:" << remoteClientDescription;
+        connect(remoteClient, &QAbstractSocket::disconnected, remoteClient, [this, remoteClient]() {
+            qInfo().noquote() << "[-] Disconnected" << this->getSocketDescrption(*remoteClient);
+
+            this->clients.removeAll(remoteClient);
+            this->buffers.remove(remoteClient);
+            this->authStates.remove(remoteClient);
+
+            remoteClient->deleteLater();
+        }); // лямбда это анонимная функция, мы передаём обработчик в виде лямбды, и захватываем в неё this и remoteClient (будем их использовать)
+        connect(remoteClient, &QIODevice::readyRead, this, &TCPGraphingServerManager::onRemoteDataChunk);
+
+        QString remoteClientDescription = QString("%1:%2").arg(remoteClient->peerAddress().toString()).arg(remoteClient->peerPort());
+        qInfo().noquote() << "[+] New connection:" << remoteClientDescription;
+    }
 }
 
 void TCPGraphingServerManager::onRemoteDataChunk() {
@@ -84,13 +111,7 @@ void TCPGraphingServerManager::onRemoteDataChunk() {
     }
     QString remoteClientDescription = this->getSocketDescrption(*remoteClient);
 
-    QHash<QTcpSocket*, QByteArray>::iterator it = this->buffers.find(remoteClient);
-    if (it == buffers.end()) {
-        qWarning() << "[?] Remote data chunk received, but no created buffer";
-        return;
-    }
-
-    QByteArray &buffer = it.value();
+    QByteArray &buffer = this->buffers[remoteClient];
     QByteArray chunk = remoteClient->readAll();
 
     qDebug().noquote().nospace()
@@ -104,7 +125,7 @@ void TCPGraphingServerManager::onRemoteDataChunk() {
 
     // TCP-поток идёт непрерывно и нам требуется установить границу логического сообщения => это будет новая строка
     while (true) {
-        int delimiterPosition = buffer.indexOf('\n');
+        qsizetype delimiterPosition = buffer.indexOf('\n');
         if (delimiterPosition == -1) // нет такого символа, сообщение не завершено
             break;
 
@@ -121,7 +142,7 @@ void TCPGraphingServerManager::onRemoteDataChunk() {
 
         GraphingMessage typedMessage;
         try {
-            typedMessage = this->parser->parse(message);
+            typedMessage = this->parser.parse(message);
         } catch (const std::exception& e) {
             qWarning().noquote().nospace()
                 << "[-] Bad message from "
@@ -130,8 +151,8 @@ void TCPGraphingServerManager::onRemoteDataChunk() {
                 << message
                 << "\"";
 
-            remoteClient->write(QString("Parse error: %1\n").arg(e.what()).toStdString().c_str());
-            return;
+            remoteClient->write(QString("Parsing error: %1\n").arg(e.what()).toUtf8());
+            continue;
         }
 
         qInfo().noquote().nospace()
@@ -140,6 +161,61 @@ void TCPGraphingServerManager::onRemoteDataChunk() {
             << ": "
             << GraphingMessageParser::getMessageDescription(typedMessage);
 
-        remoteClient->write("OK\n");
+        this->handleMessage(remoteClient, typedMessage);
+    }
+}
+
+void TCPGraphingServerManager::handleMessage(QTcpSocket* remoteClient, GraphingMessage message) {
+    if (message.type == GraphingMessageType::Login || message.type == GraphingMessageType::Register) {
+        FailableHookResult result;
+        if (this->authStates[remoteClient]) {
+            result = FailableHookResult::error((int)GraphingErrorCode::Conflict, "Already authenticated");
+        } else if (message.type == GraphingMessageType::Login) {
+            if (!this->loginHook) {
+                result = FailableHookResult::error((int)GraphingErrorCode::NotImplemented, "Login hook is not defined");
+            } else {
+                result = this->loginHook(message.parameters[0], message.parameters[1]);
+            }
+        } else if (message.type == GraphingMessageType::Register) {
+            if (!this->registrationHook) {
+                result = FailableHookResult::error((int)GraphingErrorCode::NotImplemented, "Registration hook is not defined");
+            } else {
+                result = this->registrationHook(message.parameters[0], message.parameters[1], message.parameters[2], message.parameters[3]);
+            }
+        }
+
+        if (result.success) {
+            this->authStates[remoteClient] = true;
+            remoteClient->write("OK\n");
+        } else {
+            remoteClient->write(QString("Authentication error (%1): %2\n").arg(result.errorCode).arg(result.message).toUtf8());
+            return;
+        }
+    } else if (message.type == GraphingMessageType::Calculate) {
+        if (!this->authStates[remoteClient]) {
+            remoteClient->write("Calculation error: not authenticated\n");
+            return;
+        } else if (!this->calculateFunction) {
+            remoteClient->write("Calculation errror: calculation not supported\n");
+            return;
+        }
+
+        bool aConverseOK;
+        bool bConverseOK;
+        bool cConverseOK;
+
+        int a = message.parameters[0].toInt(&aConverseOK);
+        int b = message.parameters[1].toInt(&bConverseOK);
+        int c = message.parameters[2].toInt(&cConverseOK);
+
+        if (!aConverseOK || !bConverseOK || !cConverseOK) {
+            remoteClient->write("Calculation error: a, b, c must be integers\n");
+            return;
+        }
+
+        QString result = this->calculateFunction(a, b, c);
+        remoteClient->write(result.append("\n").toUtf8());
+    } else {
+        remoteClient->write("Handling error: cannot determine message type\n");
     }
 }

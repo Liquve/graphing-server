@@ -12,8 +12,8 @@ struct FailableHookResult {
         return {true, 0, ""};
     }
 
-    static FailableHookResult error(int code, const QString& msg) {
-        return {false, code, msg};
+    static FailableHookResult error(int code, const QString& message) {
+        return {false, code, message};
     }
 };
 
