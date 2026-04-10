@@ -21,6 +21,5 @@ public slots:
 private:
     QTcpServer * mTcpServer;
     QTcpSocket * mTcpSocket;
-    //int server_status;
 };
 #endif // MYTCPSERVER_H
