@@ -12,7 +12,7 @@ int main(int argc, char *argv[])
     TCPGraphingServerManager manager(QHostAddress::AnyIPv4, 13579);
 
     manager.setLoginHook([](const QString& login, const QString& password) {
-        // временная авторизация без базы данных по жёстко установленным значениям
+        // рвеменная авторизация без базы данных по жёстко установленным значениям
         if (login == "admin" && password == "123456") {
             return FailableHookResult::ok();
         }

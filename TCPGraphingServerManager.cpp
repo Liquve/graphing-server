@@ -19,15 +19,6 @@ TCPGraphingServerManager::TCPGraphingServerManager(
 }
 
 TCPGraphingServerManager::~TCPGraphingServerManager() {
-    // закроем все соединения
-    for (QList<QTcpSocket*>::iterator it = this->clients.begin(); it != this->clients.end(); it++)
-    {
-        QTcpSocket* remoteClient = *it;
-
-        remoteClient->close();
-        remoteClient->deleteLater();
-    }
-
     // выключим сокет на всякий случай, если он неактивен ничего плохого не будет
     this->stopServer();
 }
@@ -71,6 +62,15 @@ void TCPGraphingServerManager::startServer() {
 }
 
 void TCPGraphingServerManager::stopServer() {
+    // закроем все соединения
+    for (QList<QTcpSocket*>::iterator it = this->clients.begin(); it != this->clients.end(); it++)
+    {
+        QTcpSocket* remoteClient = *it;
+
+        remoteClient->close();
+        remoteClient->deleteLater();
+    }
+
     if (this->server) {
         this->server->close();
     }
