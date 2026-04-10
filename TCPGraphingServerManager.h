@@ -3,11 +3,11 @@
 
 #include <QObject>
 #include <QtNetwork>
-#include "FailableHookResult.h"
+#include "FailableOperationResult.h"
 #include "GraphingMessageParser.h"
 
-using LoginHook = std::function<FailableHookResult(const QString&, const QString&)>;
-using RegistrationHook = std::function<FailableHookResult(const QString&, const QString&, const QString&, const QString&)>;
+using LoginHook = std::function<FailableOperationResult(const QString&, const QString&)>;
+using RegistrationHook = std::function<FailableOperationResult(const QString&, const QString&, const QString&, const QString&)>;
 using CalculateFunction = std::function<QString(int, int, int)>;
 
 // данный класс управляет TCP-сервером, реализующим протокол с тремя командами: reg, auth, func

@@ -12,15 +12,15 @@ int main(int argc, char *argv[])
     TCPGraphingServerManager manager(QHostAddress::AnyIPv4, 13579);
 
     manager.setLoginHook([](const QString& login, const QString& password) {
-        // рвеменная авторизация без базы данных по жёстко установленным значениям
+        // временная авторизация без базы данных по жёстко установленным значениям
         if (login == "admin" && password == "123456") {
-            return FailableHookResult::ok();
+            return FailableOperationResult::ok();
         }
 
-        return FailableHookResult::error((int)GraphingErrorCode::Forbidden, "Incorrect credentials");
+        return FailableOperationResult::error((int)GraphingErrorCode::Forbidden, "Incorrect credentials");
     });
     manager.setRegistrationHook([](const QString& login, const QString& password, const QString& name, const QString& email) {
-        return FailableHookResult::error((int)GraphingErrorCode::NotImplemented, "Registration not implemented");
+        return FailableOperationResult::error((int)GraphingErrorCode::NotImplemented, "Registration not implemented");
     });
 
     manager.setCalculateFunction([](int a, int b, int c) {

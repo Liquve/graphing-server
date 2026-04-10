@@ -167,18 +167,18 @@ void TCPGraphingServerManager::onRemoteDataChunk() {
 
 void TCPGraphingServerManager::handleMessage(QTcpSocket* remoteClient, GraphingMessage message) {
     if (message.type == GraphingMessageType::Login || message.type == GraphingMessageType::Register) {
-        FailableHookResult result;
+        FailableOperationResult result;
         if (this->authStates[remoteClient]) {
-            result = FailableHookResult::error((int)GraphingErrorCode::Conflict, "Already authenticated");
+            result = FailableOperationResult::error((int)GraphingErrorCode::Conflict, "Already authenticated");
         } else if (message.type == GraphingMessageType::Login) {
             if (!this->loginHook) {
-                result = FailableHookResult::error((int)GraphingErrorCode::NotImplemented, "Login hook is not defined");
+                result = FailableOperationResult::error((int)GraphingErrorCode::NotImplemented, "Login hook is not defined");
             } else {
                 result = this->loginHook(message.parameters[0], message.parameters[1]);
             }
         } else if (message.type == GraphingMessageType::Register) {
             if (!this->registrationHook) {
-                result = FailableHookResult::error((int)GraphingErrorCode::NotImplemented, "Registration hook is not defined");
+                result = FailableOperationResult::error((int)GraphingErrorCode::NotImplemented, "Registration hook is not defined");
             } else {
                 result = this->registrationHook(message.parameters[0], message.parameters[1], message.parameters[2], message.parameters[3]);
             }
