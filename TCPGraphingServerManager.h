@@ -10,14 +10,28 @@
 #include "FailableOperationResult.h"
 #include "GraphingMessageParser.h"
 
-using LoginHook = std::function<FailableOperationResult(const QString&, const QString&)>;
-using RegistrationHook = std::function<FailableOperationResult(const QString&, const QString&, const QString&, const QString&)>;
-using CalculateFunction = std::function<QString(int, int, int)>;
-
 struct GraphingServerRequest {
     quint64 clientId;
     QString clientDescription;
     GraphingMessage message;
+};
+
+struct GraphingAuthenticationRequest {
+    quint64 clientId;
+    QString clientDescription;
+    GraphingMessageType type;
+    QString login;
+    QString password;
+    QString name;
+    QString email;
+};
+
+struct GraphingCalculationRequest {
+    quint64 clientId;
+    QString clientDescription;
+    int a;
+    int b;
+    int c;
 };
 
 struct GraphingServerResponse {
@@ -28,6 +42,8 @@ struct GraphingServerResponse {
 };
 
 Q_DECLARE_METATYPE(GraphingServerRequest)
+Q_DECLARE_METATYPE(GraphingAuthenticationRequest)
+Q_DECLARE_METATYPE(GraphingCalculationRequest)
 Q_DECLARE_METATYPE(GraphingServerResponse)
 
 // данный класс управляет TCP-сервером, реализующим протокол с тремя командами: reg, auth, func
@@ -50,11 +66,6 @@ private:
     GraphingMessageParser parser;
 
     QHash<quint64, ClientSession> clients;
-    QHash<QTcpSocket*, quint64> socketClientIds;
-
-    LoginHook loginHook;
-    RegistrationHook registrationHook;
-    CalculateFunction calculateFunction;
 
     QString getListenDescription() const;
     QString getSocketDescription(const QTcpSocket&) const;
@@ -70,16 +81,12 @@ public:
     explicit TCPGraphingServerManager(QHostAddress, quint16, QObject *parent = nullptr);
     ~TCPGraphingServerManager();
 
-    void setLoginHook(LoginHook);
-    void setRegistrationHook(RegistrationHook);
-    void setCalculateFunction(CalculateFunction);
-
     void startServer();
     void stopServer();
 signals:
     void requestReceived(GraphingServerRequest);
-    void authenticationRequested(GraphingServerRequest);
-    void calculationRequested(GraphingServerRequest);
+    void authenticationRequested(GraphingAuthenticationRequest);
+    void calculationRequested(GraphingCalculationRequest);
     void responseReady(GraphingServerResponse);
 private slots:
     void onRemoteConnection();
@@ -87,9 +94,10 @@ private slots:
     void onRemoteDataChunk(quint64);
 
     void onRequestReceived(GraphingServerRequest);
-    void onAuthenticationRequested(GraphingServerRequest);
-    void onCalculationRequested(GraphingServerRequest);
     void onResponseReady(GraphingServerResponse);
+public slots:
+    void completeAuthentication(quint64, FailableOperationResult, bool authenticated = true);
+    void completeCalculation(quint64, QString);
 };
 
 #endif // GRAPHINGTCPSERVER_H

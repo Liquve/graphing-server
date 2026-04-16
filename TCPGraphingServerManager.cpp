@@ -15,6 +15,8 @@ TCPGraphingServerManager::TCPGraphingServerManager(
     qRegisterMetaType<GraphingMessageType>("GraphingMessageType");
     qRegisterMetaType<GraphingMessage>("GraphingMessage");
     qRegisterMetaType<GraphingServerRequest>("GraphingServerRequest");
+    qRegisterMetaType<GraphingAuthenticationRequest>("GraphingAuthenticationRequest");
+    qRegisterMetaType<GraphingCalculationRequest>("GraphingCalculationRequest");
     qRegisterMetaType<GraphingServerResponse>("GraphingServerResponse");
 
     this->server = new QTcpServer(this); // мы родитель, освободится автоматически при вызове деструктора
@@ -22,8 +24,6 @@ TCPGraphingServerManager::TCPGraphingServerManager(
     // обработчики строят полностью асинхронный пайплайн через очередь событий Qt
     connect(this->server, &QTcpServer::newConnection, this, &TCPGraphingServerManager::onRemoteConnection);
     connect(this, &TCPGraphingServerManager::requestReceived, this, &TCPGraphingServerManager::onRequestReceived, Qt::QueuedConnection);
-    connect(this, &TCPGraphingServerManager::authenticationRequested, this, &TCPGraphingServerManager::onAuthenticationRequested, Qt::QueuedConnection);
-    connect(this, &TCPGraphingServerManager::calculationRequested, this, &TCPGraphingServerManager::onCalculationRequested, Qt::QueuedConnection);
     connect(this, &TCPGraphingServerManager::responseReady, this, &TCPGraphingServerManager::onResponseReady, Qt::QueuedConnection);
 }
 
@@ -48,7 +48,6 @@ quint64 TCPGraphingServerManager::registerClient(QTcpSocket* remoteClient) {
     session.description = this->getSocketDescription(*remoteClient);
 
     this->clients.insert(clientId, session);
-    this->socketClientIds.insert(remoteClient, clientId);
 
     return clientId;
 }
@@ -57,11 +56,6 @@ void TCPGraphingServerManager::unregisterClient(quint64 clientId) {
     ClientSession* session = this->findClient(clientId);
     if (!session) {
         return;
-    }
-
-    QTcpSocket* remoteClient = session->socket.data();
-    if (remoteClient) {
-        this->socketClientIds.remove(remoteClient);
     }
 
     this->clients.remove(clientId);
@@ -91,18 +85,6 @@ void TCPGraphingServerManager::queueResponse(quint64 clientId, const QString& pa
 
 void TCPGraphingServerManager::queueAuthResponse(quint64 clientId, const QString& payload, bool authenticated) {
     emit this->responseReady(GraphingServerResponse{clientId, payload, true, authenticated});
-}
-
-void TCPGraphingServerManager::setLoginHook(LoginHook hook) {
-    this->loginHook = hook;
-}
-
-void TCPGraphingServerManager::setRegistrationHook(RegistrationHook hook) {
-    this->registrationHook = hook;
-}
-
-void TCPGraphingServerManager::setCalculateFunction(CalculateFunction function) {
-    this->calculateFunction = function;
 }
 
 void TCPGraphingServerManager::startServer() {
@@ -243,86 +225,75 @@ void TCPGraphingServerManager::onRemoteDataChunk(quint64 clientId) {
 
 void TCPGraphingServerManager::onRequestReceived(GraphingServerRequest request) {
     if (request.message.type == GraphingMessageType::Login || request.message.type == GraphingMessageType::Register) {
-        emit this->authenticationRequested(request);
+        QString name = request.message.parameters.length() > 2 ? request.message.parameters[2] : QString();
+        QString email = request.message.parameters.length() > 3 ? request.message.parameters[3] : QString();
+        emit this->authenticationRequested(GraphingAuthenticationRequest{
+            request.clientId,
+            request.clientDescription,
+            request.message.type,
+            request.message.parameters[0],
+            request.message.parameters[1],
+            name,
+            email
+        });
     } else if (request.message.type == GraphingMessageType::Calculate) {
-        emit this->calculationRequested(request);
+        bool aConverseOK;
+        bool bConverseOK;
+        bool cConverseOK;
+
+        int a = request.message.parameters[0].toInt(&aConverseOK);
+        int b = request.message.parameters[1].toInt(&bConverseOK);
+        int c = request.message.parameters[2].toInt(&cConverseOK);
+
+        if (!aConverseOK || !bConverseOK || !cConverseOK) {
+            this->queueResponse(request.clientId, "Calculation error: a, b, c must be integers\n");
+            return;
+        }
+
+        emit this->calculationRequested(GraphingCalculationRequest{
+            request.clientId,
+            request.clientDescription,
+            a,
+            b,
+            c
+        });
     } else {
         this->queueResponse(request.clientId, "Handling error: cannot determine message type\n");
     }
 }
 
-void TCPGraphingServerManager::onAuthenticationRequested(GraphingServerRequest request) {
-    ClientSession* session = this->findClient(request.clientId);
+void TCPGraphingServerManager::completeAuthentication(quint64 clientId, FailableOperationResult result, bool authenticated) {
+    ClientSession* session = this->findClient(clientId);
     if (!session) {
         return;
     }
 
-    FailableOperationResult result;
-    if (session->authenticated) {
+    if (session->authenticated && authenticated) {
         result = FailableOperationResult::error((int)GraphingErrorCode::Conflict, "Already authenticated");
-    } else if (request.message.type == GraphingMessageType::Login) {
-        if (!this->loginHook) {
-            result = FailableOperationResult::error((int)GraphingErrorCode::NotImplemented, "Login hook is not defined");
-        } else {
-            result = this->loginHook(request.message.parameters[0], request.message.parameters[1]);
-        }
-    } else if (request.message.type == GraphingMessageType::Register) {
-        if (!this->registrationHook) {
-            result = FailableOperationResult::error((int)GraphingErrorCode::NotImplemented, "Registration hook is not defined");
-        } else {
-            QString email = request.message.parameters.length() > 3 ? request.message.parameters[3] : QString();
-            result = this->registrationHook(
-                request.message.parameters[0],
-                request.message.parameters[1],
-                request.message.parameters[2],
-                email
-            );
-        }
-    } else {
-        result = FailableOperationResult::error((int)GraphingErrorCode::Conflict, "Unsupported authentication request");
     }
 
     if (result.success) {
-        this->queueAuthResponse(request.clientId, "OK\n", true);
+        this->queueAuthResponse(clientId, "OK\n", authenticated);
     } else {
         this->queueResponse(
-            request.clientId,
+            clientId,
             QString("Authentication error (%1): %2\n").arg(result.errorCode).arg(result.message)
         );
     }
 }
 
-void TCPGraphingServerManager::onCalculationRequested(GraphingServerRequest request) {
-    ClientSession* session = this->findClient(request.clientId);
+void TCPGraphingServerManager::completeCalculation(quint64 clientId, QString result) {
+    ClientSession* session = this->findClient(clientId);
     if (!session) {
         return;
     }
 
     if (!session->authenticated) {
-        this->queueResponse(request.clientId, "Calculation error: not authenticated\n");
+        this->queueResponse(clientId, "Calculation error: not authenticated\n");
         return;
     }
 
-    if (!this->calculateFunction) {
-        this->queueResponse(request.clientId, "Calculation errror: calculation not supported\n");
-        return;
-    }
-
-    bool aConverseOK;
-    bool bConverseOK;
-    bool cConverseOK;
-
-    int a = request.message.parameters[0].toInt(&aConverseOK);
-    int b = request.message.parameters[1].toInt(&bConverseOK);
-    int c = request.message.parameters[2].toInt(&cConverseOK);
-
-    if (!aConverseOK || !bConverseOK || !cConverseOK) {
-        this->queueResponse(request.clientId, "Calculation error: a, b, c must be integers\n");
-        return;
-    }
-
-    QString result = this->calculateFunction(a, b, c);
-    this->queueResponse(request.clientId, result.append("\n"));
+    this->queueResponse(clientId, result.append("\n"));
 }
 
 void TCPGraphingServerManager::onResponseReady(GraphingServerResponse response) {
