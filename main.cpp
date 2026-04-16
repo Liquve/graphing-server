@@ -11,19 +11,9 @@ int main(int argc, char *argv[])
 
     TCPGraphingServerManager manager(QHostAddress::AnyIPv4, 13579);
 
-    QObject::connect(&manager, &TCPGraphingServerManager::commandRequested, &manager, [&manager](const GraphingServerRequest& request) {
-        if (request.commandId == "login") {
-            if (request.parameters.length() != 2) {
-                manager.failRequest(
-                    request.clientId,
-                    request.requestId,
-                    (int)GraphingErrorCode::BadRequest,
-                    "Login requires 2 params: login|password"
-                );
-                return;
-            }
-
-            if (request.parameters[0] == "admin" && request.parameters[1] == "123456") {
+    QObject::connect(&manager, &TCPGraphingServerManager::authenticationRequested, &manager, [&manager](const GraphingAuthenticationRequest& request) {
+        if (request.type == "login") {
+            if (request.login == "admin" && request.password == "123456") {
                 manager.completeRequest(request.clientId, request.requestId);
                 return;
             }
@@ -37,17 +27,7 @@ int main(int argc, char *argv[])
             return;
         }
 
-        if (request.commandId == "register") {
-            if (request.parameters.length() < 3 || request.parameters.length() > 4) {
-                manager.failRequest(
-                    request.clientId,
-                    request.requestId,
-                    (int)GraphingErrorCode::BadRequest,
-                    "Register requires 3 or 4 params"
-                );
-                return;
-            }
-
+        if (request.type == "register") {
             manager.failRequest(
                 request.clientId,
                 request.requestId,
@@ -56,47 +36,11 @@ int main(int argc, char *argv[])
             );
             return;
         }
+    }, Qt::QueuedConnection);
 
-        if (request.commandId == "calculate") {
-            if (request.parameters.length() != 3) {
-                manager.failRequest(
-                    request.clientId,
-                    request.requestId,
-                    (int)GraphingErrorCode::BadRequest,
-                    "Calculate requires 3 integer params"
-                );
-                return;
-            }
-
-            bool aOk;
-            bool bOk;
-            bool cOk;
-
-            int a = request.parameters[0].toInt(&aOk);
-            int b = request.parameters[1].toInt(&bOk);
-            int c = request.parameters[2].toInt(&cOk);
-
-            if (!aOk || !bOk || !cOk) {
-                manager.failRequest(
-                    request.clientId,
-                    request.requestId,
-                    (int)GraphingErrorCode::BadRequest,
-                    "Calculate params must be integers"
-                );
-                return;
-            }
-
-            QString result = GraphingCalculation::getCalculationResult(a, b, c);
-            manager.completeRequest(request.clientId, request.requestId, result.split("|"));
-            return;
-        }
-
-        manager.failRequest(
-            request.clientId,
-            request.requestId,
-            (int)GraphingErrorCode::NotImplemented,
-            QString("Command \"%1\" is not implemented").arg(request.commandId)
-        );
+    QObject::connect(&manager, &TCPGraphingServerManager::calculationRequested, &manager, [&manager](const GraphingCalculationRequest& request) {
+        QString result = GraphingCalculation::getCalculationResult(request.a, request.b, request.c);
+        manager.completeRequest(request.clientId, request.requestId, result.split("|"));
     }, Qt::QueuedConnection);
 
     try {

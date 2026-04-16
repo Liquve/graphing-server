@@ -14,8 +14,29 @@ struct GraphingServerRequest {
     quint64 clientId;
     QString clientDescription;
     quint64 requestId;
-    QString commandId;
+    QString type;
     QStringList parameters;
+};
+
+struct GraphingAuthenticationRequest {
+    quint64 clientId;
+    QString clientDescription;
+    quint64 requestId;
+    QString type;
+    QString login;
+    QString password;
+    QString name;
+    QString email;
+};
+
+struct GraphingCalculationRequest {
+    quint64 clientId;
+    QString clientDescription;
+    quint64 requestId;
+    QString type;
+    int a;
+    int b;
+    int c;
 };
 
 struct GraphingServerResponse {
@@ -24,6 +45,8 @@ struct GraphingServerResponse {
 };
 
 Q_DECLARE_METATYPE(GraphingServerRequest)
+Q_DECLARE_METATYPE(GraphingAuthenticationRequest)
+Q_DECLARE_METATYPE(GraphingCalculationRequest)
 Q_DECLARE_METATYPE(GraphingServerResponse)
 Q_DECLARE_METATYPE(GraphingProtocol::MessageKind)
 Q_DECLARE_METATYPE(GraphingProtocol::Message)
@@ -38,7 +61,7 @@ private:
         QByteArray buffer;
         bool authenticated = false;
         QString description;
-        QHash<quint64, QString> pendingCommands;
+        QHash<quint64, QString> pendingTypes;
     };
 
     QHostAddress address;
@@ -69,7 +92,8 @@ public:
     void stopServer();
 signals:
     void requestReceived(GraphingServerRequest);
-    void commandRequested(GraphingServerRequest);
+    void authenticationRequested(GraphingAuthenticationRequest);
+    void calculationRequested(GraphingCalculationRequest);
     void responseReady(GraphingServerResponse);
 private slots:
     void onRemoteConnection();

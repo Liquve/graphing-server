@@ -17,6 +17,8 @@ TCPGraphingServerManager::TCPGraphingServerManager(
     qRegisterMetaType<GraphingProtocol::MessageKind>("GraphingProtocol::MessageKind");
     qRegisterMetaType<GraphingProtocol::Message>("GraphingProtocol::Message");
     qRegisterMetaType<GraphingServerRequest>("GraphingServerRequest");
+    qRegisterMetaType<GraphingAuthenticationRequest>("GraphingAuthenticationRequest");
+    qRegisterMetaType<GraphingCalculationRequest>("GraphingCalculationRequest");
     qRegisterMetaType<GraphingServerResponse>("GraphingServerResponse");
 
     this->server = new QTcpServer(this); // мы родитель, освободится автоматически при вызове деструктора
@@ -97,7 +99,7 @@ void TCPGraphingServerManager::queueParsedMessage(quint64 clientId, const Graphi
         clientId,
         session->description,
         message.correlationId,
-        fromProtocolString(message.commandId),
+        fromProtocolString(message.type),
         fromProtocolList(message.parameters)
     });
 }
@@ -272,7 +274,7 @@ void TCPGraphingServerManager::onRequestReceived(GraphingServerRequest request) 
         return;
     }
 
-    if (session->pendingCommands.contains(request.requestId)) {
+    if (session->pendingTypes.contains(request.requestId)) {
         this->queueErrorResponse(
             request.clientId,
             request.requestId,
@@ -282,7 +284,7 @@ void TCPGraphingServerManager::onRequestReceived(GraphingServerRequest request) 
         return;
     }
 
-    if (request.commandId != "login" && request.commandId != "register" && !session->authenticated) {
+    if (request.type != "login" && request.type != "register" && !session->authenticated) {
         this->queueErrorResponse(
             request.clientId,
             request.requestId,
@@ -292,8 +294,64 @@ void TCPGraphingServerManager::onRequestReceived(GraphingServerRequest request) 
         return;
     }
 
-    session->pendingCommands.insert(request.requestId, request.commandId);
-    emit this->commandRequested(request);
+    session->pendingTypes.insert(request.requestId, request.type);
+
+    if (request.type == "login" || request.type == "register") {
+        QString name = request.parameters.length() > 2 ? request.parameters[2] : QString();
+        QString email = request.parameters.length() > 3 ? request.parameters[3] : QString();
+
+        emit this->authenticationRequested(GraphingAuthenticationRequest{
+            request.clientId,
+            request.clientDescription,
+            request.requestId,
+            request.type,
+            request.parameters.length() > 0 ? request.parameters[0] : QString(),
+            request.parameters.length() > 1 ? request.parameters[1] : QString(),
+            name,
+            email
+        });
+        return;
+    }
+
+    if (request.type == "calculate") {
+        bool aOk = false;
+        bool bOk = false;
+        bool cOk = false;
+
+        int a = request.parameters.length() > 0 ? request.parameters[0].toInt(&aOk) : 0;
+        int b = request.parameters.length() > 1 ? request.parameters[1].toInt(&bOk) : 0;
+        int c = request.parameters.length() > 2 ? request.parameters[2].toInt(&cOk) : 0;
+
+        if (request.parameters.length() != 3 || !aOk || !bOk || !cOk) {
+            session->pendingTypes.remove(request.requestId);
+            this->queueErrorResponse(
+                request.clientId,
+                request.requestId,
+                (int)GraphingErrorCode::BadRequest,
+                "Calculate requires 3 integer params"
+            );
+            return;
+        }
+
+        emit this->calculationRequested(GraphingCalculationRequest{
+            request.clientId,
+            request.clientDescription,
+            request.requestId,
+            request.type,
+            a,
+            b,
+            c
+        });
+        return;
+    }
+
+    session->pendingTypes.remove(request.requestId);
+    this->queueErrorResponse(
+        request.clientId,
+        request.requestId,
+        (int)GraphingErrorCode::NotImplemented,
+        QString("Type \"%1\" is not implemented").arg(request.type)
+    );
 }
 
 void TCPGraphingServerManager::completeRequest(quint64 clientId, quint64 askRequestId, const QStringList& responseParameters) {
@@ -302,15 +360,15 @@ void TCPGraphingServerManager::completeRequest(quint64 clientId, quint64 askRequ
         return;
     }
 
-    QHash<quint64, QString>::iterator pendingRequest = session->pendingCommands.find(askRequestId);
-    if (pendingRequest == session->pendingCommands.end()) {
+    QHash<quint64, QString>::iterator pendingRequest = session->pendingTypes.find(askRequestId);
+    if (pendingRequest == session->pendingTypes.end()) {
         return;
     }
 
-    QString commandId = pendingRequest.value();
-    session->pendingCommands.erase(pendingRequest);
+    QString type = pendingRequest.value();
+    session->pendingTypes.erase(pendingRequest);
 
-    if (commandId == "login" || commandId == "register") {
+    if (type == "login" || type == "register") {
         session->authenticated = true;
     }
 
@@ -329,12 +387,12 @@ void TCPGraphingServerManager::failRequest(quint64 clientId, quint64 askRequestI
         return;
     }
 
-    QHash<quint64, QString>::iterator pendingRequest = session->pendingCommands.find(askRequestId);
-    if (pendingRequest == session->pendingCommands.end()) {
+    QHash<quint64, QString>::iterator pendingRequest = session->pendingTypes.find(askRequestId);
+    if (pendingRequest == session->pendingTypes.end()) {
         return;
     }
 
-    session->pendingCommands.erase(pendingRequest);
+    session->pendingTypes.erase(pendingRequest);
     this->queueErrorResponse(clientId, askRequestId, errorCode, errorMessage);
 }
 

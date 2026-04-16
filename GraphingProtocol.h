@@ -17,17 +17,17 @@ enum class MessageKind {
 struct Message {
     MessageKind kind;
     std::uint64_t correlationId;
-    std::string commandId;
+    std::string type;
     std::vector<std::string> parameters;
     bool success;
     int errorCode;
     std::string errorMessage;
 
-    static Message request(std::uint64_t requestId, const std::string& commandId, const std::vector<std::string>& parameters = std::vector<std::string>()) {
+    static Message request(std::uint64_t requestId, const std::string& type, const std::vector<std::string>& parameters = std::vector<std::string>()) {
         Message message;
         message.kind = MessageKind::Request;
         message.correlationId = requestId;
-        message.commandId = commandId;
+        message.type = type;
         message.parameters = parameters;
         message.success = false;
         message.errorCode = 0;
@@ -243,13 +243,13 @@ inline Message parse(const std::string& rawLine) {
 
     if (parts[0] == "request") {
         if (parts.size() < 3 || parts.size() > 4) {
-            throw std::runtime_error("Request syntax is: request <requestId> <commandId> [param1|param2|paramX...]");
+            throw std::runtime_error("Request syntax is: request <requestId> <type> [param1|param2|paramX...]");
         }
 
         std::uint64_t requestId = detail::parseUnsigned(parts[1], "requestId");
-        std::string commandId = detail::decodeEscapes(parts[2]);
-        if (commandId.empty()) {
-            throw std::runtime_error("commandId cannot be empty");
+        std::string type = detail::decodeEscapes(parts[2]);
+        if (type.empty()) {
+            throw std::runtime_error("type cannot be empty");
         }
 
         std::vector<std::string> parameters;
@@ -257,7 +257,7 @@ inline Message parse(const std::string& rawLine) {
             parameters = detail::decodeList(parts[3]);
         }
 
-        return Message::request(requestId, commandId, parameters);
+        return Message::request(requestId, type, parameters);
     }
 
     if (parts[0] == "response") {
@@ -298,7 +298,7 @@ inline Message parse(const std::string& rawLine) {
 inline std::string serialize(const Message& message) {
     if (message.kind == MessageKind::Request) {
         std::stringstream stream;
-        stream << "request " << message.correlationId << " " << detail::encodeEscapes(message.commandId);
+        stream << "request " << message.correlationId << " " << detail::encodeEscapes(message.type);
         if (!message.parameters.empty()) {
             stream << " " << detail::encodeList(message.parameters);
         }
@@ -329,7 +329,7 @@ inline std::string describe(const Message& message) {
     std::stringstream stream;
 
     if (message.kind == MessageKind::Request) {
-        stream << "Request(id=" << message.correlationId << ", command=" << message.commandId << ", params=[";
+        stream << "Request(id=" << message.correlationId << ", type=" << message.type << ", params=[";
         for (std::size_t i = 0; i < message.parameters.size(); ++i) {
             if (i > 0) {
                 stream << ", ";
