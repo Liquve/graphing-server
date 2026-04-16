@@ -13,7 +13,7 @@ private:
     PgDatabase();
 
     QString getEnvValue(const char*, const char* = nullptr) const;
-    QString hashPassword(const QString&) const;
+    FailableOperationResult ensurePgCrypto();
 public:
     PgDatabase(const PgDatabase&) = delete;
     PgDatabase& operator=(const PgDatabase&) = delete;
