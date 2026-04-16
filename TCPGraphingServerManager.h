@@ -112,6 +112,7 @@ private slots:
     void onRequestReceived(GraphingServerRequest);
     void onResponseReady(GraphingServerResponse);
 public slots:
+    void completeLogin(quint64 clientId, quint64 askRequestId, const QStringList& responseParameters = {});
     void completeRequest(quint64 clientId, quint64 askRequestId, const QStringList& responseParameters = {});
     void failRequest(quint64 clientId, quint64 askRequestId, int errorCode, const QString& errorMessage);
 };

@@ -231,6 +231,9 @@ void TCPGraphingServerManager::onRemoteDataChunk(quint64 clientId) {
         try {
             typedMessage = GraphingProtocol::parse(toProtocolString(message));
         } catch (const std::exception& e) {
+            std::uint64_t correlationId = 0;
+            GraphingProtocol::tryParseCorrelationId(toProtocolString(message), correlationId);
+
             qWarning().noquote().nospace()
                 << "[-] Bad message from "
                 << session->description
@@ -241,7 +244,7 @@ void TCPGraphingServerManager::onRemoteDataChunk(quint64 clientId) {
             this->queueProtocolMessage(
                 clientId,
                 GraphingProtocol::Message::responseError(
-                    0,
+                    correlationId,
                     (int)GraphingErrorCode::BadRequest,
                     toProtocolString(QString("Parsing error: %1").arg(e.what()))
                 )
@@ -384,7 +387,7 @@ void TCPGraphingServerManager::onRequestReceived(GraphingServerRequest request) 
     );
 }
 
-void TCPGraphingServerManager::completeRequest(quint64 clientId, quint64 askRequestId, const QStringList& responseParameters) {
+void TCPGraphingServerManager::completeLogin(quint64 clientId, quint64 askRequestId, const QStringList& responseParameters) {
     ClientSession* session = this->findClient(clientId);
     if (!session) {
         return;
@@ -396,11 +399,34 @@ void TCPGraphingServerManager::completeRequest(quint64 clientId, quint64 askRequ
     }
 
     QString type = pendingRequest.value();
-    session->pendingTypes.erase(pendingRequest);
-
-    if (type == "login" || type == "register") {
-        session->authenticated = true;
+    if (type != "login") {
+        return;
     }
+
+    session->pendingTypes.erase(pendingRequest);
+    session->authenticated = true;
+
+    std::vector<std::string> protocolParameters;
+    protocolParameters.reserve((std::size_t)responseParameters.length());
+    for (QStringList::const_iterator it = responseParameters.begin(); it != responseParameters.end(); ++it) {
+        protocolParameters.push_back(toProtocolString(*it));
+    }
+
+    this->queueProtocolMessage(clientId, GraphingProtocol::Message::responseSuccess(askRequestId, protocolParameters));
+}
+
+void TCPGraphingServerManager::completeRequest(quint64 clientId, quint64 askRequestId, const QStringList& responseParameters) {
+    ClientSession* session = this->findClient(clientId);
+    if (!session) {
+        return;
+    }
+
+    QHash<quint64, QString>::iterator pendingRequest = session->pendingTypes.find(askRequestId);
+    if (pendingRequest == session->pendingTypes.end()) {
+        return;
+    }
+
+    session->pendingTypes.erase(pendingRequest);
 
     std::vector<std::string> protocolParameters;
     protocolParameters.reserve((std::size_t)responseParameters.length());

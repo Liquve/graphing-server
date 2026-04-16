@@ -1,5 +1,6 @@
 #include "GraphingCalculation.h"
 #include <QStringList>
+#include <cmath>
 
 
 QString GraphingCalculation::getCalculationResult(int a, int b, int c) {
@@ -9,13 +10,21 @@ QString GraphingCalculation::getCalculationResult(int a, int b, int c) {
     int xMax = 10;
     int points = 20;
 
-    double step = (xMax - xMin) / (points - 1);
+    double step = static_cast<double>(xMax - xMin) / static_cast<double>(points - 1);
     for (int i = 0; i < points; i++)
     {
+        double previousX = i > 0 ? xMin + (i - 1) * step : xMin;
         bool valid = true;
         double x = xMin + i * step;
         double y;
-        if (x == 1)
+
+        // Если шаг не попадает точно в x = 1, всё равно явно обозначаем разрыв функции.
+        if (i > 0 && ((previousX < 1.0 && x > 1.0) || (previousX > 1.0 && x < 1.0)))
+        {
+            result << "1:null";
+        }
+
+        if (std::abs(x - 1.0) < 1e-9)
         {
             y = INFINITY;
             valid = false;
@@ -30,7 +39,7 @@ QString GraphingCalculation::getCalculationResult(int a, int b, int c) {
         }
         else
         {
-            y = c / (x - 1);
+            y = static_cast<double>(c) / (x - 1.0);
         }
         if (valid)
         {

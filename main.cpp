@@ -13,7 +13,7 @@ int main(int argc, char *argv[])
 
     QObject::connect(&manager, &TCPGraphingServerManager::loginRequested, &manager, [&manager](const GraphingLoginRequest& request) {
         if (request.login == "admin" && request.password == "123456") {
-            manager.completeRequest(request.clientId, request.requestId);
+            manager.completeLogin(request.clientId, request.requestId);
             return;
         }
 
@@ -26,8 +26,6 @@ int main(int argc, char *argv[])
     }, Qt::QueuedConnection);
 
     QObject::connect(&manager, &TCPGraphingServerManager::registrationRequested, &manager, [&manager](const GraphingRegistrationRequest& request) {
-        Q_UNUSED(request)
-
         manager.failRequest(
             request.clientId,
             request.requestId,

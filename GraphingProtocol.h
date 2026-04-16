@@ -157,10 +157,6 @@ namespace detail {
     }
 
     inline std::vector<std::string> decodeList(const std::string& raw) {
-        if (raw.empty()) {
-            return std::vector<std::string>();
-        }
-
         std::vector<std::string> rawParts = splitEscaped(raw, '|');
         std::vector<std::string> decoded;
         decoded.reserve(rawParts.size());
@@ -189,11 +185,19 @@ namespace detail {
             throw std::runtime_error(std::string(fieldName) + " cannot be empty");
         }
 
-        std::stringstream stream(value);
         std::uint64_t result = 0;
-        stream >> result;
-        if (stream.fail() || !stream.eof()) {
-            throw std::runtime_error(std::string(fieldName) + " must be an unsigned integer");
+        for (std::size_t i = 0; i < value.size(); ++i) {
+            char symbol = value[i];
+            if (symbol < '0' || symbol > '9') {
+                throw std::runtime_error(std::string(fieldName) + " must be an unsigned integer");
+            }
+
+            std::uint64_t digit = static_cast<std::uint64_t>(symbol - '0');
+            if (result > (UINT64_MAX - digit) / 10) {
+                throw std::runtime_error(std::string(fieldName) + " is too large");
+            }
+
+            result = result * 10 + digit;
         }
 
         return result;
@@ -231,6 +235,25 @@ namespace detail {
 
         tokens.push_back(current);
         return tokens;
+    }
+}
+
+inline bool tryParseCorrelationId(const std::string& rawLine, std::uint64_t& correlationId) {
+    try {
+        std::string line = detail::trimLineEndings(rawLine);
+        std::vector<std::string> parts = detail::splitSpaceTokens(line);
+        if (parts.size() < 2) {
+            return false;
+        }
+
+        if (parts[0] != "request" && parts[0] != "response") {
+            return false;
+        }
+
+        correlationId = detail::parseUnsigned(parts[1], "correlationId");
+        return true;
+    } catch (...) {
+        return false;
     }
 }
 
