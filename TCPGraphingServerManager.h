@@ -7,46 +7,25 @@
 #include <QObject>
 #include <QPointer>
 #include <QtNetwork>
-#include "FailableOperationResult.h"
 #include "GraphingMessageParser.h"
 
 struct GraphingServerRequest {
     quint64 clientId;
     QString clientDescription;
-    GraphingMessage message;
-};
-
-struct GraphingAuthenticationRequest {
-    quint64 clientId;
-    QString clientDescription;
-    GraphingMessageType type;
-    QString login;
-    QString password;
-    QString name;
-    QString email;
-};
-
-struct GraphingCalculationRequest {
-    quint64 clientId;
-    QString clientDescription;
-    int a;
-    int b;
-    int c;
+    quint64 requestId;
+    QString commandId;
+    QStringList parameters;
 };
 
 struct GraphingServerResponse {
     quint64 clientId;
     QString payload;
-    bool updateAuthState;
-    bool authenticated;
 };
 
 Q_DECLARE_METATYPE(GraphingServerRequest)
-Q_DECLARE_METATYPE(GraphingAuthenticationRequest)
-Q_DECLARE_METATYPE(GraphingCalculationRequest)
 Q_DECLARE_METATYPE(GraphingServerResponse)
 
-// данный класс управляет TCP-сервером, реализующим протокол с тремя командами: reg, auth, func
+// Данный класс управляет TCP-сервером и маршрутизирует клиентские request-сообщения.
 class TCPGraphingServerManager : public QObject
 {
     Q_OBJECT
@@ -56,6 +35,7 @@ private:
         QByteArray buffer;
         bool authenticated = false;
         QString description;
+        QHash<quint64, QString> pendingCommands;
     };
 
     QHostAddress address;
@@ -74,10 +54,9 @@ private:
     void unregisterClient(quint64);
     ClientSession* findClient(quint64);
     void queueParsedMessage(quint64, const GraphingMessage&);
-    void queueResponse(quint64, const QString&);
-    void queueAuthResponse(quint64, const QString&, bool);
+    void queueProtocolMessage(quint64, const GraphingMessage&);
+    void queueErrorResponse(quint64, quint64, int, const QString&);
 public:
-
     explicit TCPGraphingServerManager(QHostAddress, quint16, QObject *parent = nullptr);
     ~TCPGraphingServerManager();
 
@@ -85,8 +64,7 @@ public:
     void stopServer();
 signals:
     void requestReceived(GraphingServerRequest);
-    void authenticationRequested(GraphingAuthenticationRequest);
-    void calculationRequested(GraphingCalculationRequest);
+    void commandRequested(GraphingServerRequest);
     void responseReady(GraphingServerResponse);
 private slots:
     void onRemoteConnection();
@@ -96,8 +74,8 @@ private slots:
     void onRequestReceived(GraphingServerRequest);
     void onResponseReady(GraphingServerResponse);
 public slots:
-    void completeAuthentication(quint64, FailableOperationResult, bool authenticated = true);
-    void completeCalculation(quint64, QString);
+    void completeRequest(quint64 clientId, quint64 askRequestId, const QStringList& responseParameters = {});
+    void failRequest(quint64 clientId, quint64 askRequestId, int errorCode, const QString& errorMessage);
 };
 
 #endif // GRAPHINGTCPSERVER_H

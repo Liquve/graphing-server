@@ -12,23 +12,23 @@ TCPGraphingServerManager::TCPGraphingServerManager(
     this->address = address;
     this->port = port;
 
-    qRegisterMetaType<GraphingMessageType>("GraphingMessageType");
+    // Эти типы передаются через queued signal/slot соединения.
+    // Q_DECLARE_METATYPE в заголовках недостаточно: для асинхронной доставки через очередь событий
+    // Qt должен уметь зарегистрировать типы в runtime, чтобы копировать и переносить их между вызовами event loop.
+    qRegisterMetaType<GraphingMessageKind>("GraphingMessageKind");
     qRegisterMetaType<GraphingMessage>("GraphingMessage");
     qRegisterMetaType<GraphingServerRequest>("GraphingServerRequest");
-    qRegisterMetaType<GraphingAuthenticationRequest>("GraphingAuthenticationRequest");
-    qRegisterMetaType<GraphingCalculationRequest>("GraphingCalculationRequest");
     qRegisterMetaType<GraphingServerResponse>("GraphingServerResponse");
 
     this->server = new QTcpServer(this); // мы родитель, освободится автоматически при вызове деструктора
 
-    // обработчики строят полностью асинхронный пайплайн через очередь событий Qt
+    // Обработчики строят полностью асинхронный пайплайн через очередь событий Qt.
     connect(this->server, &QTcpServer::newConnection, this, &TCPGraphingServerManager::onRemoteConnection);
     connect(this, &TCPGraphingServerManager::requestReceived, this, &TCPGraphingServerManager::onRequestReceived, Qt::QueuedConnection);
     connect(this, &TCPGraphingServerManager::responseReady, this, &TCPGraphingServerManager::onResponseReady, Qt::QueuedConnection);
 }
 
 TCPGraphingServerManager::~TCPGraphingServerManager() {
-    // выключим сокет на всякий случай, если он неактивен ничего плохого не будет
     this->stopServer();
 }
 
@@ -72,19 +72,28 @@ TCPGraphingServerManager::ClientSession* TCPGraphingServerManager::findClient(qu
 
 void TCPGraphingServerManager::queueParsedMessage(quint64 clientId, const GraphingMessage& message) {
     ClientSession* session = this->findClient(clientId);
-    if (!session) {
+    if (!session || message.kind != GraphingMessageKind::Request) {
         return;
     }
 
-    emit this->requestReceived(GraphingServerRequest{clientId, session->description, message});
+    emit this->requestReceived(GraphingServerRequest{
+        clientId,
+        session->description,
+        message.correlationId,
+        message.commandId,
+        message.parameters
+    });
 }
 
-void TCPGraphingServerManager::queueResponse(quint64 clientId, const QString& payload) {
-    emit this->responseReady(GraphingServerResponse{clientId, payload, false, false});
+void TCPGraphingServerManager::queueProtocolMessage(quint64 clientId, const GraphingMessage& message) {
+    emit this->responseReady(GraphingServerResponse{
+        clientId,
+        this->parser.serialize(message).append("\n")
+    });
 }
 
-void TCPGraphingServerManager::queueAuthResponse(quint64 clientId, const QString& payload, bool authenticated) {
-    emit this->responseReady(GraphingServerResponse{clientId, payload, true, authenticated});
+void TCPGraphingServerManager::queueErrorResponse(quint64 clientId, quint64 askRequestId, int errorCode, const QString& errorMessage) {
+    this->queueProtocolMessage(clientId, GraphingMessage::responseError(askRequestId, errorCode, errorMessage));
 }
 
 void TCPGraphingServerManager::startServer() {
@@ -95,7 +104,6 @@ void TCPGraphingServerManager::startServer() {
     if (this->server->listen(this->address, this->port)) {
         qInfo().noquote().nospace() << "[+] Started TCP Server on " << listenDescription;
     } else {
-        // эта ошибка заставит программу вылететь, если она не обработана и покажет понятный текст
         throw std::runtime_error(
             QString("Cannot start TCP Server (%1): %2")
                 .arg(this->server->serverError())
@@ -176,20 +184,18 @@ void TCPGraphingServerManager::onRemoteDataChunk(quint64 clientId) {
         << "[#] New chunk from "
         << session->description
         << ": \""
-        << QString::fromUtf8(chunk).replace("\n", "\\n").replace("\r", "\\r") // экранируем чтобы в логах было понятнее
+        << QString::fromUtf8(chunk).replace("\n", "\\n").replace("\r", "\\r")
         << "\"";
 
     session->buffer.append(chunk);
 
-    // TCP-поток идёт непрерывно и нам требуется установить границу логического сообщения => это будет новая строка
     while (true) {
         qsizetype delimiterPosition = session->buffer.indexOf('\n');
-        if (delimiterPosition == -1) // нет такого символа, сообщение не завершено
+        if (delimiterPosition == -1)
             break;
 
         QString message = QString::fromUtf8(session->buffer.left(delimiterPosition));
         session->buffer.remove(0, delimiterPosition + 1);
-        // нашли логическое сообщение => удалили из буфера, декодировали в строку
 
         qDebug().noquote().nospace()
             << "[#] Raw message from "
@@ -209,7 +215,10 @@ void TCPGraphingServerManager::onRemoteDataChunk(quint64 clientId) {
                 << message
                 << "\"";
 
-            this->queueResponse(clientId, QString("Parsing error: %1\n").arg(e.what()));
+            this->queueProtocolMessage(
+                clientId,
+                GraphingMessage::responseError(0, (int)GraphingErrorCode::BadRequest, QString("Parsing error: %1").arg(e.what()))
+            );
             continue;
         }
 
@@ -219,91 +228,90 @@ void TCPGraphingServerManager::onRemoteDataChunk(quint64 clientId) {
             << ": "
             << GraphingMessageParser::getMessageDescription(typedMessage);
 
+        if (typedMessage.kind != GraphingMessageKind::Request) {
+            this->queueErrorResponse(
+                clientId,
+                typedMessage.correlationId,
+                (int)GraphingErrorCode::BadRequest,
+                "Server accepts request messages only"
+            );
+            continue;
+        }
+
         this->queueParsedMessage(clientId, typedMessage);
     }
 }
 
 void TCPGraphingServerManager::onRequestReceived(GraphingServerRequest request) {
-    if (request.message.type == GraphingMessageType::Login || request.message.type == GraphingMessageType::Register) {
-        QString name = request.message.parameters.length() > 2 ? request.message.parameters[2] : QString();
-        QString email = request.message.parameters.length() > 3 ? request.message.parameters[3] : QString();
-        emit this->authenticationRequested(GraphingAuthenticationRequest{
-            request.clientId,
-            request.clientDescription,
-            request.message.type,
-            request.message.parameters[0],
-            request.message.parameters[1],
-            name,
-            email
-        });
-    } else if (request.message.type == GraphingMessageType::Calculate) {
-        bool aConverseOK;
-        bool bConverseOK;
-        bool cConverseOK;
-
-        int a = request.message.parameters[0].toInt(&aConverseOK);
-        int b = request.message.parameters[1].toInt(&bConverseOK);
-        int c = request.message.parameters[2].toInt(&cConverseOK);
-
-        if (!aConverseOK || !bConverseOK || !cConverseOK) {
-            this->queueResponse(request.clientId, "Calculation error: a, b, c must be integers\n");
-            return;
-        }
-
-        emit this->calculationRequested(GraphingCalculationRequest{
-            request.clientId,
-            request.clientDescription,
-            a,
-            b,
-            c
-        });
-    } else {
-        this->queueResponse(request.clientId, "Handling error: cannot determine message type\n");
-    }
-}
-
-void TCPGraphingServerManager::completeAuthentication(quint64 clientId, FailableOperationResult result, bool authenticated) {
-    ClientSession* session = this->findClient(clientId);
+    ClientSession* session = this->findClient(request.clientId);
     if (!session) {
         return;
     }
 
-    if (session->authenticated && authenticated) {
-        result = FailableOperationResult::error((int)GraphingErrorCode::Conflict, "Already authenticated");
-    }
-
-    if (result.success) {
-        this->queueAuthResponse(clientId, "OK\n", authenticated);
-    } else {
-        this->queueResponse(
-            clientId,
-            QString("Authentication error (%1): %2\n").arg(result.errorCode).arg(result.message)
+    if (session->pendingCommands.contains(request.requestId)) {
+        this->queueErrorResponse(
+            request.clientId,
+            request.requestId,
+            (int)GraphingErrorCode::Conflict,
+            "Request with this requestId is already pending"
         );
+        return;
     }
+
+    if (request.commandId != "login" && request.commandId != "register" && !session->authenticated) {
+        this->queueErrorResponse(
+            request.clientId,
+            request.requestId,
+            (int)GraphingErrorCode::Forbidden,
+            "Not authenticated"
+        );
+        return;
+    }
+
+    session->pendingCommands.insert(request.requestId, request.commandId);
+    emit this->commandRequested(request);
 }
 
-void TCPGraphingServerManager::completeCalculation(quint64 clientId, QString result) {
+void TCPGraphingServerManager::completeRequest(quint64 clientId, quint64 askRequestId, const QStringList& responseParameters) {
     ClientSession* session = this->findClient(clientId);
     if (!session) {
         return;
     }
 
-    if (!session->authenticated) {
-        this->queueResponse(clientId, "Calculation error: not authenticated\n");
+    QHash<quint64, QString>::iterator pendingRequest = session->pendingCommands.find(askRequestId);
+    if (pendingRequest == session->pendingCommands.end()) {
         return;
     }
 
-    this->queueResponse(clientId, result.append("\n"));
+    QString commandId = pendingRequest.value();
+    session->pendingCommands.erase(pendingRequest);
+
+    if (commandId == "login" || commandId == "register") {
+        session->authenticated = true;
+    }
+
+    this->queueProtocolMessage(clientId, GraphingMessage::responseSuccess(askRequestId, responseParameters));
+}
+
+void TCPGraphingServerManager::failRequest(quint64 clientId, quint64 askRequestId, int errorCode, const QString& errorMessage) {
+    ClientSession* session = this->findClient(clientId);
+    if (!session) {
+        return;
+    }
+
+    QHash<quint64, QString>::iterator pendingRequest = session->pendingCommands.find(askRequestId);
+    if (pendingRequest == session->pendingCommands.end()) {
+        return;
+    }
+
+    session->pendingCommands.erase(pendingRequest);
+    this->queueErrorResponse(clientId, askRequestId, errorCode, errorMessage);
 }
 
 void TCPGraphingServerManager::onResponseReady(GraphingServerResponse response) {
     ClientSession* session = this->findClient(response.clientId);
     if (!session || !session->socket) {
         return;
-    }
-
-    if (response.updateAuthState) {
-        session->authenticated = response.authenticated;
     }
 
     if (session->socket->state() != QAbstractSocket::ConnectedState) {

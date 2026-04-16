@@ -2,7 +2,8 @@
 #define GRAPHINGERRORCODE_H
 
 enum class GraphingErrorCode {
-    NotImplemented = 1,
+    BadRequest = 1,
+    NotImplemented,
     Forbidden,
     Conflict
 };
