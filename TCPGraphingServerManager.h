@@ -18,11 +18,18 @@ struct GraphingServerRequest {
     QStringList parameters;
 };
 
-struct GraphingAuthenticationRequest {
+struct GraphingLoginRequest {
     quint64 clientId;
     QString clientDescription;
     quint64 requestId;
-    QString type;
+    QString login;
+    QString password;
+};
+
+struct GraphingRegistrationRequest {
+    quint64 clientId;
+    QString clientDescription;
+    quint64 requestId;
     QString login;
     QString password;
     QString name;
@@ -45,7 +52,8 @@ struct GraphingServerResponse {
 };
 
 Q_DECLARE_METATYPE(GraphingServerRequest)
-Q_DECLARE_METATYPE(GraphingAuthenticationRequest)
+Q_DECLARE_METATYPE(GraphingLoginRequest)
+Q_DECLARE_METATYPE(GraphingRegistrationRequest)
 Q_DECLARE_METATYPE(GraphingCalculationRequest)
 Q_DECLARE_METATYPE(GraphingServerResponse)
 Q_DECLARE_METATYPE(GraphingProtocol::MessageKind)
@@ -92,7 +100,8 @@ public:
     void stopServer();
 signals:
     void requestReceived(GraphingServerRequest);
-    void authenticationRequested(GraphingAuthenticationRequest);
+    void loginRequested(GraphingLoginRequest);
+    void registrationRequested(GraphingRegistrationRequest);
     void calculationRequested(GraphingCalculationRequest);
     void responseReady(GraphingServerResponse);
 private slots:

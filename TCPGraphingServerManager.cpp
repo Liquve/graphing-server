@@ -17,7 +17,8 @@ TCPGraphingServerManager::TCPGraphingServerManager(
     qRegisterMetaType<GraphingProtocol::MessageKind>("GraphingProtocol::MessageKind");
     qRegisterMetaType<GraphingProtocol::Message>("GraphingProtocol::Message");
     qRegisterMetaType<GraphingServerRequest>("GraphingServerRequest");
-    qRegisterMetaType<GraphingAuthenticationRequest>("GraphingAuthenticationRequest");
+    qRegisterMetaType<GraphingLoginRequest>("GraphingLoginRequest");
+    qRegisterMetaType<GraphingRegistrationRequest>("GraphingRegistrationRequest");
     qRegisterMetaType<GraphingCalculationRequest>("GraphingCalculationRequest");
     qRegisterMetaType<GraphingServerResponse>("GraphingServerResponse");
 
@@ -296,19 +297,48 @@ void TCPGraphingServerManager::onRequestReceived(GraphingServerRequest request) 
 
     session->pendingTypes.insert(request.requestId, request.type);
 
-    if (request.type == "login" || request.type == "register") {
-        QString name = request.parameters.length() > 2 ? request.parameters[2] : QString();
-        QString email = request.parameters.length() > 3 ? request.parameters[3] : QString();
+    if (request.type == "login") {
+        if (request.parameters.length() != 2) {
+            session->pendingTypes.remove(request.requestId);
+            this->queueErrorResponse(
+                request.clientId,
+                request.requestId,
+                (int)GraphingErrorCode::BadRequest,
+                "Login requires 2 params: login|password"
+            );
+            return;
+        }
 
-        emit this->authenticationRequested(GraphingAuthenticationRequest{
+        emit this->loginRequested(GraphingLoginRequest{
             request.clientId,
             request.clientDescription,
             request.requestId,
-            request.type,
-            request.parameters.length() > 0 ? request.parameters[0] : QString(),
-            request.parameters.length() > 1 ? request.parameters[1] : QString(),
-            name,
-            email
+            request.parameters[0],
+            request.parameters[1]
+        });
+        return;
+    }
+
+    if (request.type == "register") {
+        if (request.parameters.length() < 3 || request.parameters.length() > 4) {
+            session->pendingTypes.remove(request.requestId);
+            this->queueErrorResponse(
+                request.clientId,
+                request.requestId,
+                (int)GraphingErrorCode::BadRequest,
+                "Register requires 3 or 4 params"
+            );
+            return;
+        }
+
+        emit this->registrationRequested(GraphingRegistrationRequest{
+            request.clientId,
+            request.clientDescription,
+            request.requestId,
+            request.parameters[0],
+            request.parameters[1],
+            request.parameters[2],
+            request.parameters.length() > 3 ? request.parameters[3] : QString()
         });
         return;
     }
