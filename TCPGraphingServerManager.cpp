@@ -1,6 +1,5 @@
 #include "TCPGraphingServerManager.h"
 #include "GraphingErrorCode.h"
-#include "GraphingMessage.h"
 #include <QDebug>
 
 TCPGraphingServerManager::TCPGraphingServerManager(
@@ -15,8 +14,8 @@ TCPGraphingServerManager::TCPGraphingServerManager(
     // Эти типы передаются через queued signal/slot соединения.
     // Q_DECLARE_METATYPE в заголовках недостаточно: для асинхронной доставки через очередь событий
     // Qt должен уметь зарегистрировать типы в runtime, чтобы копировать и переносить их между вызовами event loop.
-    qRegisterMetaType<GraphingMessageKind>("GraphingMessageKind");
-    qRegisterMetaType<GraphingMessage>("GraphingMessage");
+    qRegisterMetaType<GraphingProtocol::MessageKind>("GraphingProtocol::MessageKind");
+    qRegisterMetaType<GraphingProtocol::Message>("GraphingProtocol::Message");
     qRegisterMetaType<GraphingServerRequest>("GraphingServerRequest");
     qRegisterMetaType<GraphingServerResponse>("GraphingServerResponse");
 
@@ -38,6 +37,24 @@ QString TCPGraphingServerManager::getListenDescription() const {
 
 QString TCPGraphingServerManager::getSocketDescription(const QTcpSocket& socket) const {
     return QString("%1:%2").arg(socket.peerAddress().toString()).arg(socket.peerPort());
+}
+
+QString TCPGraphingServerManager::fromProtocolString(const std::string& value) {
+    return QString::fromUtf8(value.c_str(), (qsizetype)value.size());
+}
+
+std::string TCPGraphingServerManager::toProtocolString(const QString& value) {
+    QByteArray utf8 = value.toUtf8();
+    return std::string(utf8.constData(), (std::size_t)utf8.size());
+}
+
+QStringList TCPGraphingServerManager::fromProtocolList(const std::vector<std::string>& values) {
+    QStringList list;
+    for (std::vector<std::string>::const_iterator it = values.begin(); it != values.end(); ++it) {
+        list.append(fromProtocolString(*it));
+    }
+
+    return list;
 }
 
 quint64 TCPGraphingServerManager::registerClient(QTcpSocket* remoteClient) {
@@ -70,9 +87,9 @@ TCPGraphingServerManager::ClientSession* TCPGraphingServerManager::findClient(qu
     return &sessionIterator.value();
 }
 
-void TCPGraphingServerManager::queueParsedMessage(quint64 clientId, const GraphingMessage& message) {
+void TCPGraphingServerManager::queueParsedMessage(quint64 clientId, const GraphingProtocol::Message& message) {
     ClientSession* session = this->findClient(clientId);
-    if (!session || message.kind != GraphingMessageKind::Request) {
+    if (!session || message.kind != GraphingProtocol::MessageKind::Request) {
         return;
     }
 
@@ -80,20 +97,23 @@ void TCPGraphingServerManager::queueParsedMessage(quint64 clientId, const Graphi
         clientId,
         session->description,
         message.correlationId,
-        message.commandId,
-        message.parameters
+        fromProtocolString(message.commandId),
+        fromProtocolList(message.parameters)
     });
 }
 
-void TCPGraphingServerManager::queueProtocolMessage(quint64 clientId, const GraphingMessage& message) {
+void TCPGraphingServerManager::queueProtocolMessage(quint64 clientId, const GraphingProtocol::Message& message) {
     emit this->responseReady(GraphingServerResponse{
         clientId,
-        this->parser.serialize(message).append("\n")
+        fromProtocolString(GraphingProtocol::serialize(message)).append("\n")
     });
 }
 
 void TCPGraphingServerManager::queueErrorResponse(quint64 clientId, quint64 askRequestId, int errorCode, const QString& errorMessage) {
-    this->queueProtocolMessage(clientId, GraphingMessage::responseError(askRequestId, errorCode, errorMessage));
+    this->queueProtocolMessage(
+        clientId,
+        GraphingProtocol::Message::responseError(askRequestId, errorCode, toProtocolString(errorMessage))
+    );
 }
 
 void TCPGraphingServerManager::startServer() {
@@ -204,9 +224,9 @@ void TCPGraphingServerManager::onRemoteDataChunk(quint64 clientId) {
             << message
             << "\"";
 
-        GraphingMessage typedMessage;
+        GraphingProtocol::Message typedMessage;
         try {
-            typedMessage = this->parser.parse(message);
+            typedMessage = GraphingProtocol::parse(toProtocolString(message));
         } catch (const std::exception& e) {
             qWarning().noquote().nospace()
                 << "[-] Bad message from "
@@ -217,7 +237,11 @@ void TCPGraphingServerManager::onRemoteDataChunk(quint64 clientId) {
 
             this->queueProtocolMessage(
                 clientId,
-                GraphingMessage::responseError(0, (int)GraphingErrorCode::BadRequest, QString("Parsing error: %1").arg(e.what()))
+                GraphingProtocol::Message::responseError(
+                    0,
+                    (int)GraphingErrorCode::BadRequest,
+                    toProtocolString(QString("Parsing error: %1").arg(e.what()))
+                )
             );
             continue;
         }
@@ -226,9 +250,9 @@ void TCPGraphingServerManager::onRemoteDataChunk(quint64 clientId) {
             << "[+] Message from "
             << session->description
             << ": "
-            << GraphingMessageParser::getMessageDescription(typedMessage);
+            << fromProtocolString(GraphingProtocol::describe(typedMessage));
 
-        if (typedMessage.kind != GraphingMessageKind::Request) {
+        if (typedMessage.kind != GraphingProtocol::MessageKind::Request) {
             this->queueErrorResponse(
                 clientId,
                 typedMessage.correlationId,
@@ -290,7 +314,13 @@ void TCPGraphingServerManager::completeRequest(quint64 clientId, quint64 askRequ
         session->authenticated = true;
     }
 
-    this->queueProtocolMessage(clientId, GraphingMessage::responseSuccess(askRequestId, responseParameters));
+    std::vector<std::string> protocolParameters;
+    protocolParameters.reserve((std::size_t)responseParameters.length());
+    for (QStringList::const_iterator it = responseParameters.begin(); it != responseParameters.end(); ++it) {
+        protocolParameters.push_back(toProtocolString(*it));
+    }
+
+    this->queueProtocolMessage(clientId, GraphingProtocol::Message::responseSuccess(askRequestId, protocolParameters));
 }
 
 void TCPGraphingServerManager::failRequest(quint64 clientId, quint64 askRequestId, int errorCode, const QString& errorMessage) {

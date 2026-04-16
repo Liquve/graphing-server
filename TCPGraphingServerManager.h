@@ -6,8 +6,9 @@
 #include <QMetaType>
 #include <QObject>
 #include <QPointer>
+#include <QStringList>
 #include <QtNetwork>
-#include "GraphingMessageParser.h"
+#include "GraphingProtocol.h"
 
 struct GraphingServerRequest {
     quint64 clientId;
@@ -24,6 +25,8 @@ struct GraphingServerResponse {
 
 Q_DECLARE_METATYPE(GraphingServerRequest)
 Q_DECLARE_METATYPE(GraphingServerResponse)
+Q_DECLARE_METATYPE(GraphingProtocol::MessageKind)
+Q_DECLARE_METATYPE(GraphingProtocol::Message)
 
 // Данный класс управляет TCP-сервером и маршрутизирует клиентские request-сообщения.
 class TCPGraphingServerManager : public QObject
@@ -43,18 +46,20 @@ private:
     quint64 nextClientId = 1;
 
     QTcpServer* server;
-    GraphingMessageParser parser;
 
     QHash<quint64, ClientSession> clients;
 
     QString getListenDescription() const;
     QString getSocketDescription(const QTcpSocket&) const;
+    static QString fromProtocolString(const std::string&);
+    static std::string toProtocolString(const QString&);
+    static QStringList fromProtocolList(const std::vector<std::string>&);
 
     quint64 registerClient(QTcpSocket*);
     void unregisterClient(quint64);
     ClientSession* findClient(quint64);
-    void queueParsedMessage(quint64, const GraphingMessage&);
-    void queueProtocolMessage(quint64, const GraphingMessage&);
+    void queueParsedMessage(quint64, const GraphingProtocol::Message&);
+    void queueProtocolMessage(quint64, const GraphingProtocol::Message&);
     void queueErrorResponse(quint64, quint64, int, const QString&);
 public:
     explicit TCPGraphingServerManager(QHostAddress, quint16, QObject *parent = nullptr);

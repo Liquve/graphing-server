@@ -19,7 +19,6 @@ DEFINES += QT_DEPRECATED_WARNINGS
 
 SOURCES += \
     GraphingCalculation.cpp \
-    GraphingMessageParser.cpp \
     TCPGraphingServerManager.cpp \
     main.cpp
 
@@ -32,6 +31,5 @@ HEADERS += \
     FailableOperationResult.h \
     GraphingCalculation.h \
     GraphingErrorCode.h \
-    GraphingMessage.h \
-    GraphingMessageParser.h \
+    GraphingProtocol.h \
     TCPGraphingServerManager.h
