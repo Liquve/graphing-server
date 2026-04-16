@@ -1,5 +1,6 @@
 #include "PgDatabase.h"
 #include "GraphingErrorCode.h"
+#include <QDebug>
 #include <QProcessEnvironment>
 #include <QRandomGenerator>
 #include <QSqlError>
@@ -8,6 +9,9 @@
 
 namespace {
     const char* kConnectionName = "graphing_server_pg_database";
+    const char* kPasswordResetCleanupJobName = "graphing_server_password_reset_cleanup";
+    const char* kPasswordResetCleanupJobSchedule = "0 * * * *";
+    const char* kPasswordResetCleanupJobCommand = "SELECT public.cleanup_expired_password_reset_tokens_job()";
 }
 
 PgDatabase::PgDatabase() {
@@ -67,6 +71,133 @@ FailableOperationResult PgDatabase::ensurePasswordResetSchema() {
     return FailableOperationResult::error(
         (int)GraphingErrorCode::InternalError,
         QString("Cannot ensure password reset schema: %1").arg(query.lastError().text())
+    );
+}
+
+FailableOperationResult PgDatabase::ensurePasswordResetCleanupFunction() {
+    QSqlQuery query(this->database);
+    if (query.exec(
+        "CREATE OR REPLACE FUNCTION public.cleanup_expired_password_reset_tokens_job() "
+        "RETURNS integer "
+        "LANGUAGE SQL "
+        "AS $$ "
+        "WITH deleted AS ("
+        "    DELETE FROM public.password_reset_tokens "
+        "    WHERE expires_at <= NOW() "
+        "    RETURNING 1"
+        ") "
+        "SELECT COUNT(*)::integer FROM deleted"
+        "$$"
+    )) {
+        return FailableOperationResult::ok();
+    }
+
+    return FailableOperationResult::error(
+        (int)GraphingErrorCode::InternalError,
+        QString("Cannot ensure password reset cleanup function: %1").arg(query.lastError().text())
+    );
+}
+
+FailableOperationResult PgDatabase::ensurePasswordResetCleanupJob() {
+    QSqlQuery extensionAvailableQuery(this->database);
+    extensionAvailableQuery.prepare(
+        "SELECT EXISTS("
+        "SELECT 1 "
+        "FROM pg_available_extensions "
+        "WHERE name = 'pg_cron'"
+        ")"
+    );
+    if (!extensionAvailableQuery.exec() || !extensionAvailableQuery.next()) {
+        return FailableOperationResult::error(
+            (int)GraphingErrorCode::InternalError,
+            QString("Cannot inspect pg_cron availability: %1").arg(extensionAvailableQuery.lastError().text())
+        );
+    }
+
+    if (!extensionAvailableQuery.value(0).toBool()) {
+        qWarning().noquote() << "[-] pg_cron is not available in this PostgreSQL cluster, background cleanup job was not created";
+        return FailableOperationResult::ok();
+    }
+
+    QSqlQuery extensionInstalledQuery(this->database);
+    extensionInstalledQuery.prepare(
+        "SELECT EXISTS("
+        "SELECT 1 "
+        "FROM pg_extension "
+        "WHERE extname = 'pg_cron'"
+        ")"
+    );
+    if (!extensionInstalledQuery.exec() || !extensionInstalledQuery.next()) {
+        return FailableOperationResult::error(
+            (int)GraphingErrorCode::InternalError,
+            QString("Cannot inspect installed pg_cron extension: %1").arg(extensionInstalledQuery.lastError().text())
+        );
+    }
+
+    if (!extensionInstalledQuery.value(0).toBool()) {
+        QSqlQuery createExtensionQuery(this->database);
+        if (!createExtensionQuery.exec("CREATE EXTENSION IF NOT EXISTS pg_cron")) {
+            qWarning().noquote() << "[-] Cannot create pg_cron extension, background cleanup job was not created:"
+                                 << createExtensionQuery.lastError().text();
+            return FailableOperationResult::ok();
+        }
+    }
+
+    QSqlQuery existingJobQuery(this->database);
+    existingJobQuery.prepare(
+        "SELECT jobid "
+        "FROM cron.job "
+        "WHERE jobname = :job_name "
+        "LIMIT 1"
+    );
+    existingJobQuery.bindValue(":job_name", kPasswordResetCleanupJobName);
+    if (!existingJobQuery.exec()) {
+        return FailableOperationResult::error(
+            (int)GraphingErrorCode::InternalError,
+            QString("Cannot inspect password reset cleanup cron job: %1").arg(existingJobQuery.lastError().text())
+        );
+    }
+
+    if (existingJobQuery.next()) {
+        QSqlQuery alterJobQuery(this->database);
+        alterJobQuery.prepare(
+            "SELECT cron.alter_job("
+            ":job_id, "
+            ":schedule, "
+            ":command"
+            ")"
+        );
+        alterJobQuery.bindValue(":job_id", existingJobQuery.value(0));
+        alterJobQuery.bindValue(":schedule", kPasswordResetCleanupJobSchedule);
+        alterJobQuery.bindValue(":command", kPasswordResetCleanupJobCommand);
+        if (alterJobQuery.exec()) {
+            return FailableOperationResult::ok();
+        }
+
+        return FailableOperationResult::error(
+            (int)GraphingErrorCode::InternalError,
+            QString("Cannot update password reset cleanup cron job: %1").arg(alterJobQuery.lastError().text())
+        );
+    }
+
+    QSqlQuery scheduleJobQuery(this->database);
+    scheduleJobQuery.prepare(
+        "SELECT cron.schedule("
+        ":job_name, "
+        ":schedule, "
+        ":command"
+        ")"
+    );
+    scheduleJobQuery.bindValue(":job_name", kPasswordResetCleanupJobName);
+    scheduleJobQuery.bindValue(":schedule", kPasswordResetCleanupJobSchedule);
+    scheduleJobQuery.bindValue(":command", kPasswordResetCleanupJobCommand);
+    if (scheduleJobQuery.exec()) {
+        return FailableOperationResult::ok();
+    }
+
+    return FailableOperationResult::error(
+        (int)GraphingErrorCode::InternalError,
+        QString("Cannot create password reset cleanup cron job: %1").arg(scheduleJobQuery.lastError().text())
     );
 }
 
@@ -150,7 +281,17 @@ FailableOperationResult PgDatabase::connect() {
         return pgCryptoResult;
     }
 
-    return this->ensurePasswordResetSchema();
+    FailableOperationResult passwordResetSchemaResult = this->ensurePasswordResetSchema();
+    if (!passwordResetSchemaResult.success) {
+        return passwordResetSchemaResult;
+    }
+
+    FailableOperationResult cleanupFunctionResult = this->ensurePasswordResetCleanupFunction();
+    if (!cleanupFunctionResult.success) {
+        return cleanupFunctionResult;
+    }
+
+    return this->ensurePasswordResetCleanupJob();
 }
 
 PgDatabase& PgDatabase::instance() {
@@ -212,7 +353,18 @@ FailableOperationResult PgDatabase::sync() {
         "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), "
         "CONSTRAINT password_reset_tokens_token_hash_not_blank CHECK (btrim(token_hash) <> ''), "
         "CONSTRAINT password_reset_tokens_verification_code_hash_not_blank CHECK (btrim(verification_code_hash) <> '')"
-        ")"
+        ")",
+        "CREATE OR REPLACE FUNCTION public.cleanup_expired_password_reset_tokens_job() "
+        "RETURNS integer "
+        "LANGUAGE SQL "
+        "AS $$ "
+        "WITH deleted AS ("
+        "    DELETE FROM public.password_reset_tokens "
+        "    WHERE expires_at <= NOW() "
+        "    RETURNING 1"
+        ") "
+        "SELECT COUNT(*)::integer FROM deleted"
+        "$$"
     });
 
     QSqlQuery query(this->database);
@@ -234,7 +386,7 @@ FailableOperationResult PgDatabase::sync() {
         );
     }
 
-    return FailableOperationResult::ok();
+    return this->ensurePasswordResetCleanupJob();
 }
 
 FailableOperationResult PgDatabase::login(const QString& login, const QString& password) {

@@ -23,6 +23,8 @@ private:
     QString getEnvValue(const char*, const char* = nullptr) const;
     FailableOperationResult ensurePgCrypto();
     FailableOperationResult ensurePasswordResetSchema();
+    FailableOperationResult ensurePasswordResetCleanupFunction();
+    FailableOperationResult ensurePasswordResetCleanupJob();
     FailableOperationResult cleanupExpiredPasswordResetTokens();
     QString generateResetToken() const;
     QString generateVerificationCode() const;
