@@ -20,6 +20,9 @@ TCPGraphingServerManager::TCPGraphingServerManager(
     qRegisterMetaType<GraphingLoginRequest>("GraphingLoginRequest");
     qRegisterMetaType<GraphingRegistrationRequest>("GraphingRegistrationRequest");
     qRegisterMetaType<GraphingCalculationRequest>("GraphingCalculationRequest");
+    qRegisterMetaType<GraphingPasswordResetRequest>("GraphingPasswordResetRequest");
+    qRegisterMetaType<GraphingPasswordResetVerificationRequest>("GraphingPasswordResetVerificationRequest");
+    qRegisterMetaType<GraphingPasswordResetUpdateRequest>("GraphingPasswordResetUpdateRequest");
     qRegisterMetaType<GraphingServerResponse>("GraphingServerResponse");
 
     this->server = new QTcpServer(this); // мы родитель, освободится автоматически при вызове деструктора
@@ -58,6 +61,20 @@ QStringList TCPGraphingServerManager::fromProtocolList(const std::vector<std::st
     }
 
     return list;
+}
+
+bool TCPGraphingServerManager::isSixDigitCode(const QString& value) {
+    if (value.length() != 6) {
+        return false;
+    }
+
+    for (QString::const_iterator it = value.begin(); it != value.end(); ++it) {
+        if (!it->isDigit()) {
+            return false;
+        }
+    }
+
+    return true;
 }
 
 quint64 TCPGraphingServerManager::registerClient(QTcpSocket* remoteClient) {
@@ -288,7 +305,14 @@ void TCPGraphingServerManager::onRequestReceived(GraphingServerRequest request) 
         return;
     }
 
-    if (request.type != "login" && request.type != "register" && !session->authenticated) {
+    if (
+        request.type != "login" &&
+        request.type != "register" &&
+        request.type != "request_password_reset" &&
+        request.type != "verify_password_reset" &&
+        request.type != "reset_password" &&
+        !session->authenticated
+    ) {
         this->queueErrorResponse(
             request.clientId,
             request.requestId,
@@ -342,6 +366,71 @@ void TCPGraphingServerManager::onRequestReceived(GraphingServerRequest request) 
             request.parameters[1],
             request.parameters[2],
             request.parameters[3]
+        });
+        return;
+    }
+
+    if (request.type == "request_password_reset") {
+        if (request.parameters.length() != 1 || request.parameters[0].isEmpty()) {
+            session->pendingTypes.remove(request.requestId);
+            this->queueErrorResponse(
+                request.clientId,
+                request.requestId,
+                (int)GraphingErrorCode::BadRequest,
+                "Request password reset requires 1 param: loginOrEmail"
+            );
+            return;
+        }
+
+        emit this->passwordResetRequested(GraphingPasswordResetRequest{
+            request.clientId,
+            request.clientDescription,
+            request.requestId,
+            request.parameters[0]
+        });
+        return;
+    }
+
+    if (request.type == "verify_password_reset") {
+        if (request.parameters.length() != 2 || request.parameters[0].isEmpty() || !isSixDigitCode(request.parameters[1])) {
+            session->pendingTypes.remove(request.requestId);
+            this->queueErrorResponse(
+                request.clientId,
+                request.requestId,
+                (int)GraphingErrorCode::BadRequest,
+                "Verify password reset requires 2 params: token|sixDigitCode"
+            );
+            return;
+        }
+
+        emit this->passwordResetVerificationRequested(GraphingPasswordResetVerificationRequest{
+            request.clientId,
+            request.clientDescription,
+            request.requestId,
+            request.parameters[0],
+            request.parameters[1]
+        });
+        return;
+    }
+
+    if (request.type == "reset_password") {
+        if (request.parameters.length() != 2 || request.parameters[0].isEmpty() || request.parameters[1].isEmpty()) {
+            session->pendingTypes.remove(request.requestId);
+            this->queueErrorResponse(
+                request.clientId,
+                request.requestId,
+                (int)GraphingErrorCode::BadRequest,
+                "Reset password requires 2 params: token|newPassword"
+            );
+            return;
+        }
+
+        emit this->passwordResetUpdateRequested(GraphingPasswordResetUpdateRequest{
+            request.clientId,
+            request.clientDescription,
+            request.requestId,
+            request.parameters[0],
+            request.parameters[1]
         });
         return;
     }

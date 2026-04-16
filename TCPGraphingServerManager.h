@@ -46,6 +46,29 @@ struct GraphingCalculationRequest {
     int c;
 };
 
+struct GraphingPasswordResetRequest {
+    quint64 clientId;
+    QString clientDescription;
+    quint64 requestId;
+    QString loginOrEmail;
+};
+
+struct GraphingPasswordResetVerificationRequest {
+    quint64 clientId;
+    QString clientDescription;
+    quint64 requestId;
+    QString token;
+    QString verificationCode;
+};
+
+struct GraphingPasswordResetUpdateRequest {
+    quint64 clientId;
+    QString clientDescription;
+    quint64 requestId;
+    QString token;
+    QString newPassword;
+};
+
 struct GraphingServerResponse {
     quint64 clientId;
     QString payload;
@@ -55,6 +78,9 @@ Q_DECLARE_METATYPE(GraphingServerRequest)
 Q_DECLARE_METATYPE(GraphingLoginRequest)
 Q_DECLARE_METATYPE(GraphingRegistrationRequest)
 Q_DECLARE_METATYPE(GraphingCalculationRequest)
+Q_DECLARE_METATYPE(GraphingPasswordResetRequest)
+Q_DECLARE_METATYPE(GraphingPasswordResetVerificationRequest)
+Q_DECLARE_METATYPE(GraphingPasswordResetUpdateRequest)
 Q_DECLARE_METATYPE(GraphingServerResponse)
 Q_DECLARE_METATYPE(GraphingProtocol::MessageKind)
 Q_DECLARE_METATYPE(GraphingProtocol::Message)
@@ -85,6 +111,7 @@ private:
     static QString fromProtocolString(const std::string&);
     static std::string toProtocolString(const QString&);
     static QStringList fromProtocolList(const std::vector<std::string>&);
+    static bool isSixDigitCode(const QString&);
 
     quint64 registerClient(QTcpSocket*);
     void unregisterClient(quint64);
@@ -103,6 +130,9 @@ signals:
     void loginRequested(GraphingLoginRequest);
     void registrationRequested(GraphingRegistrationRequest);
     void calculationRequested(GraphingCalculationRequest);
+    void passwordResetRequested(GraphingPasswordResetRequest);
+    void passwordResetVerificationRequested(GraphingPasswordResetVerificationRequest);
+    void passwordResetUpdateRequested(GraphingPasswordResetUpdateRequest);
     void responseReady(GraphingServerResponse);
 private slots:
     void onRemoteConnection();

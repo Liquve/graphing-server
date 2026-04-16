@@ -19,6 +19,7 @@ DEFINES += QT_DEPRECATED_WARNINGS
 
 SOURCES += \
     GraphingCalculation.cpp \
+    MailServiceClient.cpp \
     PgDatabase.cpp \
     TCPGraphingServerManager.cpp \
     main.cpp
@@ -33,5 +34,6 @@ HEADERS += \
     GraphingCalculation.h \
     GraphingErrorCode.h \
     GraphingProtocol.h \
+    MailServiceClient.h \
     PgDatabase.h \
     TCPGraphingServerManager.h
