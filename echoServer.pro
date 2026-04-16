@@ -1,6 +1,6 @@
 QT -= gui
 
-QT += network #Для работы с сетью
+QT += network sql #Для работы с сетью и PostgreSQL
 
 
 CONFIG += c++11 console
@@ -19,6 +19,7 @@ DEFINES += QT_DEPRECATED_WARNINGS
 
 SOURCES += \
     GraphingCalculation.cpp \
+    PgDatabase.cpp \
     TCPGraphingServerManager.cpp \
     main.cpp
 
@@ -32,4 +33,5 @@ HEADERS += \
     GraphingCalculation.h \
     GraphingErrorCode.h \
     GraphingProtocol.h \
+    PgDatabase.h \
     TCPGraphingServerManager.h

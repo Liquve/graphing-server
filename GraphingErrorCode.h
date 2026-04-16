@@ -5,7 +5,8 @@ enum class GraphingErrorCode {
     BadRequest = 1,
     NotImplemented,
     Forbidden,
-    Conflict
+    Conflict,
+    InternalError
 };
 
 #endif // GRAPHINGERRORCODE_H

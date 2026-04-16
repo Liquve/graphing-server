@@ -323,13 +323,13 @@ void TCPGraphingServerManager::onRequestReceived(GraphingServerRequest request) 
     }
 
     if (request.type == "register") {
-        if (request.parameters.length() < 3 || request.parameters.length() > 4) {
+        if (request.parameters.length() != 4) {
             session->pendingTypes.remove(request.requestId);
             this->queueErrorResponse(
                 request.clientId,
                 request.requestId,
                 (int)GraphingErrorCode::BadRequest,
-                "Register requires 3 or 4 params"
+                "Register requires 4 params: login|password|name|email"
             );
             return;
         }
@@ -341,7 +341,7 @@ void TCPGraphingServerManager::onRequestReceived(GraphingServerRequest request) 
             request.parameters[0],
             request.parameters[1],
             request.parameters[2],
-            request.parameters.length() > 3 ? request.parameters[3] : QString()
+            request.parameters[3]
         });
         return;
     }
