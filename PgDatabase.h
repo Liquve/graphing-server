@@ -21,6 +21,7 @@ private:
     PgDatabase();
 
     QString getEnvValue(const char*, const char* = nullptr) const;
+    FailableOperationResult ensureConnectionAlive();
     FailableOperationResult ensurePgCrypto();
     FailableOperationResult ensurePasswordResetSchema();
     FailableOperationResult ensurePasswordResetCleanupFunction();

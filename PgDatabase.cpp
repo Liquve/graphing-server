@@ -38,6 +38,27 @@ QString PgDatabase::getEnvValue(const char* primaryName, const char* fallbackNam
     return "";
 }
 
+FailableOperationResult PgDatabase::ensureConnectionAlive() {
+    if (!this->database.isOpen()) {
+        return FailableOperationResult::error(
+            (int)GraphingErrorCode::InternalError,
+            "Database connection is not open"
+        );
+    }
+
+    QSqlQuery query(this->database);
+    if (query.exec("SELECT 1") && query.next()) {
+        return FailableOperationResult::ok();
+    }
+
+    QString errorText = query.lastError().text();
+    this->database.close();
+    return FailableOperationResult::error(
+        (int)GraphingErrorCode::InternalError,
+        QString("Database connection became unusable: %1").arg(errorText)
+    );
+}
+
 FailableOperationResult PgDatabase::ensurePgCrypto() {
     QSqlQuery query(this->database);
     if (query.exec("CREATE EXTENSION IF NOT EXISTS pgcrypto")) {
@@ -233,7 +254,12 @@ QString PgDatabase::generateVerificationCode() const {
 
 FailableOperationResult PgDatabase::connect() {
     if (this->database.isOpen()) {
-        return FailableOperationResult::ok();
+        FailableOperationResult connectionAliveResult = this->ensureConnectionAlive();
+        if (connectionAliveResult.success) {
+            return FailableOperationResult::ok();
+        }
+
+        qWarning().noquote() << "[-] Reopening stale PostgreSQL connection:" << connectionAliveResult.message;
     }
 
     QString hostName = this->getEnvValue("DB_HOST", "PGHOST");
@@ -263,6 +289,14 @@ FailableOperationResult PgDatabase::connect() {
     this->database.setDatabaseName(databaseName);
     this->database.setUserName(userName);
     this->database.setPassword(password);
+    this->database.setConnectOptions(
+        "sslmode=require;"
+        "connect_timeout=10;"
+        "keepalives=1;"
+        "keepalives_idle=30;"
+        "keepalives_interval=10;"
+        "keepalives_count=3"
+    );
 
     if (!this->database.open()) {
         return FailableOperationResult::error(
