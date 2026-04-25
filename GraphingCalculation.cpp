@@ -8,7 +8,7 @@ QString GraphingCalculation::getCalculationResult(int a, int b, int c) {
 
     int xMin = -10;
     int xMax = 10;
-    int points = 20;
+    int points = 1000;
 
     double step = static_cast<double>(xMax - xMin) / static_cast<double>(points - 1);
     for (int i = 0; i < points; i++)

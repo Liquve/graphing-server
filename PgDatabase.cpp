@@ -396,27 +396,43 @@ FailableOperationResult PgDatabase::login(const QString& login, const QString& p
     }
 
     QSqlQuery query(this->database);
-    query.prepare(
-        "SELECT 1 "
-        "FROM public.users "
-        "WHERE login = :login "
-        "AND password_hash = crypt(:password, password_hash)"
-    );
+
+    // 1. Сначала проверяем, существует ли вообще такой логин
+    query.prepare("SELECT password_hash FROM public.users WHERE login = :login");
     query.bindValue(":login", login);
-    query.bindValue(":password", password);
 
     if (!query.exec()) {
         return FailableOperationResult::error(
             (int)GraphingErrorCode::InternalError,
-            QString("Login query failed: %1").arg(query.lastError().text())
-        );
+            QString("Login lookup failed: %1").arg(query.lastError().text())
+            );
     }
 
     if (!query.next()) {
-        return FailableOperationResult::error((int)GraphingErrorCode::Forbidden, "Incorrect credentials");
+        // Если записей нет — логин не найден
+        return FailableOperationResult::error((int)GraphingErrorCode::Forbidden, "Пользователь с таким логином не найден");
     }
 
-    return FailableOperationResult::ok();
+    // 2. Логин найден, теперь проверяем пароль
+    QString passwordHash = query.value(0).toString();
+
+    QSqlQuery authQuery(this->database);
+    authQuery.prepare("SELECT (password_hash = crypt(:password, password_hash)) FROM public.users WHERE login = :login");
+    authQuery.bindValue(":login", login);
+    authQuery.bindValue(":password", password);
+
+    if (!authQuery.exec() || !authQuery.next()) {
+        return FailableOperationResult::error((int)GraphingErrorCode::InternalError, "Ошибка при проверке пароля");
+    }
+
+    bool passwordMatches = authQuery.value(0).toBool();
+
+    if (passwordMatches) {
+        return FailableOperationResult::ok(); // Всё отлично!
+    } else {
+        // Логин был в базе, но пароль не совпал
+        return FailableOperationResult::error((int)GraphingErrorCode::Forbidden, "Введен неверный пароль");
+    }
 }
 
 FailableOperationResult PgDatabase::registerUser(const QString& login, const QString& password, const QString& name, const QString& email) {
