@@ -2,6 +2,9 @@ QT -= gui
 
 QT += network sql #Для работы с сетью и PostgreSQL
 
+INCLUDEPATH += src
+TARGET = graphing-server
+
 
 CONFIG += c++11 console
 CONFIG -= app_bundle
@@ -18,11 +21,11 @@ DEFINES += QT_DEPRECATED_WARNINGS
 #DEFINES += QT_DISABLE_DEPRECATED_BEFORE=0x060000    # disables all the APIs deprecated before Qt 6.0.0
 
 SOURCES += \
-    GraphingCalculation.cpp \
-    MailServiceClient.cpp \
-    PgDatabase.cpp \
-    TCPGraphingServerManager.cpp \
-    main.cpp
+    src/GraphingCalculation.cpp \
+    src/MailServiceClient.cpp \
+    src/PgDatabase.cpp \
+    src/TCPGraphingServerManager.cpp \
+    src/main.cpp
 
 # Default rules for deployment.
 qnx: target.path = /tmp/$${TARGET}/bin
@@ -30,10 +33,10 @@ else: unix:!android: target.path = /opt/$${TARGET}/bin
 !isEmpty(target.path): INSTALLS += target
 
 HEADERS += \
-    FailableOperationResult.h \
-    GraphingCalculation.h \
-    GraphingErrorCode.h \
-    GraphingProtocol.h \
-    MailServiceClient.h \
-    PgDatabase.h \
-    TCPGraphingServerManager.h
+    src/FailableOperationResult.h \
+    src/GraphingCalculation.h \
+    src/GraphingErrorCode.h \
+    src/GraphingProtocol.h \
+    src/MailServiceClient.h \
+    src/PgDatabase.h \
+    src/TCPGraphingServerManager.h

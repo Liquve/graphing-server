@@ -322,6 +322,16 @@ void TCPGraphingServerManager::onRequestReceived(GraphingServerRequest request) 
         return;
     }
 
+    if (session->authenticated && (request.type == "login" || request.type == "register")) {
+        this->queueErrorResponse(
+            request.clientId,
+            request.requestId,
+            (int)GraphingErrorCode::Forbidden,
+            "Already authenticated"
+        );
+        return;
+    }
+
     session->pendingTypes.insert(request.requestId, request.type);
 
     if (request.type == "login") {
@@ -515,7 +525,12 @@ void TCPGraphingServerManager::completeRequest(quint64 clientId, quint64 askRequ
         return;
     }
 
+    QString type = pendingRequest.value();
     session->pendingTypes.erase(pendingRequest);
+
+    if (type == "register" && !session->authenticated) {
+        session->authenticated = true;
+    }
 
     std::vector<std::string> protocolParameters;
     protocolParameters.reserve((std::size_t)responseParameters.length());

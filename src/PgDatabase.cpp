@@ -38,6 +38,27 @@ QString PgDatabase::getEnvValue(const char* primaryName, const char* fallbackNam
     return "";
 }
 
+FailableOperationResult PgDatabase::ensureConnectionAlive() {
+    if (!this->database.isOpen()) {
+        return FailableOperationResult::error(
+            (int)GraphingErrorCode::InternalError,
+            "Database connection is not open"
+        );
+    }
+
+    QSqlQuery query(this->database);
+    if (query.exec("SELECT 1") && query.next()) {
+        return FailableOperationResult::ok();
+    }
+
+    QString errorText = query.lastError().text();
+    this->database.close();
+    return FailableOperationResult::error(
+        (int)GraphingErrorCode::InternalError,
+        QString("Database connection became unusable: %1").arg(errorText)
+    );
+}
+
 FailableOperationResult PgDatabase::ensurePgCrypto() {
     QSqlQuery query(this->database);
     if (query.exec("CREATE EXTENSION IF NOT EXISTS pgcrypto")) {
@@ -233,7 +254,12 @@ QString PgDatabase::generateVerificationCode() const {
 
 FailableOperationResult PgDatabase::connect() {
     if (this->database.isOpen()) {
-        return FailableOperationResult::ok();
+        FailableOperationResult connectionAliveResult = this->ensureConnectionAlive();
+        if (connectionAliveResult.success) {
+            return FailableOperationResult::ok();
+        }
+
+        qWarning().noquote() << "[-] Reopening stale PostgreSQL connection:" << connectionAliveResult.message;
     }
 
     QString hostName = this->getEnvValue("DB_HOST", "PGHOST");
@@ -263,6 +289,14 @@ FailableOperationResult PgDatabase::connect() {
     this->database.setDatabaseName(databaseName);
     this->database.setUserName(userName);
     this->database.setPassword(password);
+    this->database.setConnectOptions(
+        "sslmode=require;"
+        "connect_timeout=10;"
+        "keepalives=1;"
+        "keepalives_idle=30;"
+        "keepalives_interval=10;"
+        "keepalives_count=3"
+    );
 
     if (!this->database.open()) {
         return FailableOperationResult::error(
@@ -396,43 +430,30 @@ FailableOperationResult PgDatabase::login(const QString& login, const QString& p
     }
 
     QSqlQuery query(this->database);
-
-    // 1. Сначала проверяем, существует ли вообще такой логин
-    query.prepare("SELECT password_hash FROM public.users WHERE login = :login");
+    query.prepare(
+        "SELECT password_hash = crypt(:password, password_hash) "
+        "FROM public.users "
+        "WHERE login = :login"
+    );
     query.bindValue(":login", login);
+    query.bindValue(":password", password);
 
     if (!query.exec()) {
         return FailableOperationResult::error(
             (int)GraphingErrorCode::InternalError,
-            QString("Login lookup failed: %1").arg(query.lastError().text())
-            );
+            QString("Login query failed: %1").arg(query.lastError().text())
+        );
     }
 
     if (!query.next()) {
-        // Если записей нет — логин не найден
-        return FailableOperationResult::error((int)GraphingErrorCode::Forbidden, "Пользователь с таким логином не найден");
+        return FailableOperationResult::error((int)GraphingErrorCode::Forbidden, "User with this login was not found");
     }
 
-    // 2. Логин найден, теперь проверяем пароль
-    QString passwordHash = query.value(0).toString();
-
-    QSqlQuery authQuery(this->database);
-    authQuery.prepare("SELECT (password_hash = crypt(:password, password_hash)) FROM public.users WHERE login = :login");
-    authQuery.bindValue(":login", login);
-    authQuery.bindValue(":password", password);
-
-    if (!authQuery.exec() || !authQuery.next()) {
-        return FailableOperationResult::error((int)GraphingErrorCode::InternalError, "Ошибка при проверке пароля");
+    if (!query.value(0).toBool()) {
+        return FailableOperationResult::error((int)GraphingErrorCode::Forbidden, "Incorrect password");
     }
 
-    bool passwordMatches = authQuery.value(0).toBool();
-
-    if (passwordMatches) {
-        return FailableOperationResult::ok(); // Всё отлично!
-    } else {
-        // Логин был в базе, но пароль не совпал
-        return FailableOperationResult::error((int)GraphingErrorCode::Forbidden, "Введен неверный пароль");
-    }
+    return FailableOperationResult::ok();
 }
 
 FailableOperationResult PgDatabase::registerUser(const QString& login, const QString& password, const QString& name, const QString& email) {

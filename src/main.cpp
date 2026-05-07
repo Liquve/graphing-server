@@ -15,14 +15,14 @@ int main(int argc, char *argv[])
     PgDatabase& database = PgDatabase::instance();
     FailableOperationResult databaseConnectionResult = database.connect();
     if (!databaseConnectionResult.success) {
-        qFatal().noquote() << QString("Fatal database connection error: %1").arg(databaseConnectionResult.message);
+        qCritical().noquote() << QString("Fatal database connection error: %1").arg(databaseConnectionResult.message);
         return 1;
     }
 
     MailServiceClient mailService;
     FailableOperationResult mailServiceConfigurationResult = mailService.configure();
     if (!mailServiceConfigurationResult.success) {
-        qFatal().noquote() << QString("Fatal mail service configuration error: %1").arg(mailServiceConfigurationResult.message);
+        qCritical().noquote() << QString("Fatal mail service configuration error: %1").arg(mailServiceConfigurationResult.message);
         return 1;
     }
 
@@ -54,8 +54,18 @@ int main(int argc, char *argv[])
     }, Qt::QueuedConnection);
 
     QObject::connect(&manager, &TCPGraphingServerManager::calculationRequested, &manager, [&manager](const GraphingCalculationRequest& request) {
-        QString result = GraphingCalculation::getCalculationResult(request.a, request.b, request.c);
-        manager.completeRequest(request.clientId, request.requestId, result.split("|"));
+        GraphingCalculation::Result result = GraphingCalculation::calculate(request.a, request.b, request.c);
+        if (!result.success) {
+            manager.failRequest(
+                request.clientId,
+                request.requestId,
+                static_cast<int>(GraphingErrorCode::InternalError),
+                result.errorMessage
+            );
+            return;
+        }
+
+        manager.completeRequest(request.clientId, request.requestId, result.value.split("|"));
     }, Qt::QueuedConnection);
 
     QObject::connect(&manager, &TCPGraphingServerManager::passwordResetRequested, &manager, [&manager, &database, &mailService](const GraphingPasswordResetRequest& request) {
@@ -111,7 +121,7 @@ int main(int argc, char *argv[])
     try {
         manager.startServer();
     } catch (const std::exception& e) {
-        qFatal() << QString("Fatal exception while trying to start TCP Server: %1").arg(e.what());
+        qCritical().noquote() << QString("Fatal exception while trying to start TCP Server: %1").arg(e.what());
         return 1;
     }
 

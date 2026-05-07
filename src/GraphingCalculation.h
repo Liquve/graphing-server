@@ -4,7 +4,13 @@
 #include <QString>
 
 namespace GraphingCalculation {
-    QString getCalculationResult(int, int, int);
+    struct Result {
+        bool success = false;
+        QString value;
+        QString errorMessage;
+    };
+
+    Result calculate(int, int, int);
 }
 
 #endif // GRAPHINGCALCULATION_H
