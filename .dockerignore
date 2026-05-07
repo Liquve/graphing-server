@@ -1,9 +1,12 @@
+.git
+.agents
 .codex
+.qtcreator
 .env
-.qtcreator/
-.user
-build/
-build-binary/
+build
+build-binary
+Dockerfile
+docker-compose.override.yml
 *.pro.user
 *.qmake.stash
 Makefile

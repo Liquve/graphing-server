@@ -267,6 +267,10 @@ FailableOperationResult PgDatabase::connect() {
     QString databaseName = this->getEnvValue("DB_NAME", "PGDATABASE");
     QString userName = this->getEnvValue("DB_USER", "PGUSER");
     QString password = this->getEnvValue("DB_PASSWORD", "PGPASSWORD");
+    QString sslMode = this->getEnvValue("DB_SSLMODE", "PGSSLMODE");
+    if (sslMode.isEmpty()) {
+        sslMode = "require";
+    }
 
     if (hostName.isEmpty() || portValue.isEmpty() || databaseName.isEmpty() || userName.isEmpty() || password.isEmpty()) {
         return FailableOperationResult::error(
@@ -290,7 +294,7 @@ FailableOperationResult PgDatabase::connect() {
     this->database.setUserName(userName);
     this->database.setPassword(password);
     this->database.setConnectOptions(
-        "sslmode=require;"
+        QString("sslmode=%1;").arg(sslMode) +
         "connect_timeout=10;"
         "keepalives=1;"
         "keepalives_idle=30;"
