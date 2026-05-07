@@ -7,11 +7,16 @@
 #define LIBFN_EXPORT
 #endif
 
-LIBFN_EXPORT void calculate(int a, int b, int c, int *count, double **values)
+LIBFN_EXPORT void calculate_points(int a, int b, int c, int points, int *count, double **values)
 {
     int xMin = -10;
     int xMax = 10;
-    int points = 1000;
+
+    if (points < 2) {
+        if (count) *count = 0;
+        if (values) *values = NULL;
+        return;
+    }
 
     double eps = 1e-9;
     double step = (double)(xMax - xMin) / (double)(points - 1);

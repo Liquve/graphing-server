@@ -8,7 +8,7 @@
     #include <dlfcn.h>
 #endif
 
-typedef void (*libfn_calculate_t)(int, int, int, int*, double**);
+typedef void (*libfn_calculate_points_t)(int, int, int, int, int*, double**);
 typedef void (*libfn_free_values_t)(double*);
 
 int main(int argc, char *argv[]) {
@@ -28,11 +28,11 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    libfn_calculate_t calculate =
-        (libfn_calculate_t)GetProcAddress(handle, "calculate");
+    libfn_calculate_points_t calculate_points =
+        (libfn_calculate_points_t)GetProcAddress(handle, "calculate_points");
 
-    if (!calculate) {
-        printf("GetProcAddress calculate error: %lu\n", GetLastError());
+    if (!calculate_points) {
+        printf("GetProcAddress calculate_points error: %lu\n", GetLastError());
         FreeLibrary(handle);
         return 1;
     }
@@ -58,13 +58,13 @@ int main(int argc, char *argv[]) {
 
     dlerror();
 
-    libfn_calculate_t calculate =
-        (libfn_calculate_t)dlsym(handle, "calculate");
+    libfn_calculate_points_t calculate_points =
+        (libfn_calculate_points_t)dlsym(handle, "calculate_points");
 
     error = dlerror();
 
     if (error) {
-        printf("dlsym calculate error: %s\n", error);
+        printf("dlsym calculate_points error: %s\n", error);
         dlclose(handle);
         return 1;
     }
@@ -83,10 +83,10 @@ int main(int argc, char *argv[]) {
     }
 #endif
 
-    int a, b, c;
+    int a, b, c, points;
 
-    printf("Enter a b c: ");
-    if (scanf("%d %d %d", &a, &b, &c) != 3) {
+    printf("Enter a b c points: ");
+    if (scanf("%d %d %d %d", &a, &b, &c, &points) != 4) {
         printf("Invalid input\n");
 
 #ifdef _WIN32
@@ -100,7 +100,7 @@ int main(int argc, char *argv[]) {
     int count = 0;
     double *values = NULL;
 
-    calculate(a, b, c, &count, &values);
+    calculate_points(a, b, c, points, &count, &values);
 
     if (!values) {
         printf("Function returned NULL\n");

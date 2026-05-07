@@ -10,21 +10,50 @@
 
 namespace {
 
-typedef void (*calculate_fn_t)(int, int, int, int*, double**);
+typedef void (*calculate_points_fn_t)(int, int, int, int, int*, double**);
 typedef void (*free_values_fn_t)(double*);
+
+const int kDefaultPoints = 1000;
+const int kMinimumPoints = 2;
+
+int resolvePoints()
+{
+    QByteArray rawValue = qgetenv("GRAPHING_CALCULATION_POINTS");
+    if (rawValue.isEmpty()) {
+        qInfo().noquote() << "[#] GRAPHING_CALCULATION_POINTS is not set, using default:" << kDefaultPoints;
+        return kDefaultPoints;
+    }
+
+    bool ok = false;
+    int points = QString::fromLocal8Bit(rawValue).toInt(&ok);
+    if (!ok || points < kMinimumPoints) {
+        qWarning().noquote()
+            << "[?] Invalid GRAPHING_CALCULATION_POINTS value:"
+            << QString::fromLocal8Bit(rawValue)
+            << "- using default:"
+            << kDefaultPoints;
+        return kDefaultPoints;
+    }
+
+    qInfo().noquote() << "[#] Using graphing calculation points from environment:" << points;
+    return points;
+}
 
 struct LibFnLoader
 {
     QLibrary library;
 
-    calculate_fn_t calculate = nullptr;
+    calculate_points_fn_t calculate_points = nullptr;
     free_values_fn_t free_values = nullptr;
 
     QString error;
+    int points = kDefaultPoints;
     bool loaded = false;
 
     LibFnLoader()
     {
+        points = resolvePoints();
+
         QByteArray path = qgetenv("LIBFN_PATH");
 
         if (path.isEmpty()) {
@@ -46,18 +75,18 @@ struct LibFnLoader
 
         qInfo().noquote() << "[+] Graphing calculation library loaded:" << library.fileName();
 
-        calculate = reinterpret_cast<calculate_fn_t>(
-            library.resolve("calculate")
+        calculate_points = reinterpret_cast<calculate_points_fn_t>(
+            library.resolve("calculate_points")
         );
 
-        if (!calculate) {
-            error = QString("Cannot resolve symbol calculate in %1: %2").arg(library.fileName(), library.errorString());
+        if (!calculate_points) {
+            error = QString("Cannot resolve symbol calculate_points in %1: %2").arg(library.fileName(), library.errorString());
             qCritical().noquote() << "[-]" << error;
             library.unload();
             return;
         }
 
-        qDebug().noquote() << "[#] Resolved graphing calculation symbol: calculate";
+        qDebug().noquote() << "[#] Resolved graphing calculation symbol: calculate_points";
 
         free_values = reinterpret_cast<free_values_fn_t>(
             library.resolve("free_values")
@@ -67,7 +96,7 @@ struct LibFnLoader
             error = QString("Cannot resolve symbol free_values in %1: %2").arg(library.fileName(), library.errorString());
             qCritical().noquote() << "[-]" << error;
             library.unload();
-            calculate = nullptr;
+            calculate_points = nullptr;
             return;
         }
 
@@ -90,7 +119,7 @@ GraphingCalculation::Result GraphingCalculation::calculate(int a, int b, int c)
 {
     LibFnLoader& lib = getLibFn();
 
-    if (!lib.loaded || !lib.calculate || !lib.free_values) {
+    if (!lib.loaded || !lib.calculate_points || !lib.free_values) {
         return Result{false, QString(), lib.error.isEmpty() ? "Graphing calculation library is not loaded" : lib.error};
     }
 
@@ -103,10 +132,12 @@ GraphingCalculation::Result GraphingCalculation::calculate(int a, int b, int c)
         << ", b="
         << b
         << ", c="
-        << c;
+        << c
+        << ", points="
+        << lib.points;
 
     try {
-        lib.calculate(a, b, c, &count, &values);
+        lib.calculate_points(a, b, c, lib.points, &count, &values);
     } catch (const std::exception& e) {
         QString error = QString("Graphing calculation library threw exception: %1").arg(e.what());
         qCritical().noquote() << "[-]" << error;
