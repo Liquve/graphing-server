@@ -1,17 +1,6 @@
 services:
   db:
-    build:
-      context: .
-      dockerfile: docker/db/Dockerfile
-    image: graphing-server-db:local
-    command:
-      - postgres
-      - -c
-      - shared_preload_libraries=pg_cron
-      - -c
-      - cron.use_background_workers=on
-      - -c
-      - cron.database_name=${APP_DB_NAME:-calc_db}
+    image: postgres:16
     environment:
       POSTGRES_DB: ${APP_DB_NAME:-calc_db}
       POSTGRES_USER: ${POSTGRES_SUPERUSER:-postgres}
@@ -23,6 +12,7 @@ services:
       - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+      - ./docker/db/init/001-init-graphing-server.sh:/docker-entrypoint-initdb.d/001-init-graphing-server.sh:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${APP_DB_NAME}\""]
       interval: 5s

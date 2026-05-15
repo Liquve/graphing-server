@@ -24,9 +24,7 @@ private:
     FailableOperationResult ensureConnectionAlive();
     FailableOperationResult ensurePgCrypto();
     FailableOperationResult ensurePasswordResetSchema();
-    FailableOperationResult ensurePasswordResetCleanupFunction();
-    FailableOperationResult ensurePasswordResetCleanupJob();
-    FailableOperationResult cleanupExpiredPasswordResetTokens();
+    FailableOperationResult dropLegacyPasswordResetCleanupFunction();
     QString generateResetToken() const;
     QString generateVerificationCode() const;
 public:
@@ -40,7 +38,7 @@ public:
     FailableOperationResult login(const QString&, const QString&);
     FailableOperationResult registerUser(const QString&, const QString&, const QString&, const QString&);
     PasswordResetCreationResult createPasswordReset(const QString&);
-    FailableOperationResult cancelPasswordReset(const QString&);
+    FailableOperationResult cancelPasswordReset(const QString&, const QString& = QString());
     FailableOperationResult verifyPasswordReset(const QString&, const QString&);
     FailableOperationResult resetPassword(const QString&, const QString&);
 };

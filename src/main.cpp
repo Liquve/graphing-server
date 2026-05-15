@@ -110,9 +110,9 @@ int main(int argc, char *argv[])
     }, Qt::QueuedConnection);
 
     QObject::connect(&mailService, &MailServiceClient::passwordResetMailFailed, &manager, [&manager, &database](quint64 clientId, quint64 requestId, const QString& token, int errorCode, const QString& errorMessage) {
-        FailableOperationResult cleanupResult = database.cancelPasswordReset(token);
+        FailableOperationResult cleanupResult = database.cancelPasswordReset(token, errorMessage);
         if (!cleanupResult.success) {
-            qWarning().noquote() << "[-] Cannot cleanup failed password reset token:" << cleanupResult.message;
+            qWarning().noquote() << "[-] Cannot mark failed password reset token:" << cleanupResult.message;
         }
 
         manager.failRequest(clientId, requestId, errorCode, errorMessage);
