@@ -1,24 +1,42 @@
 #include "PgDatabase.h"
+#include "DbModels.h"
+#include "DbModels-odb.hxx"
 #include "GraphingErrorCode.h"
+#include <QByteArray>
 #include <QDebug>
 #include <QProcessEnvironment>
 #include <QRandomGenerator>
-#include <QSqlError>
-#include <QSqlQuery>
 #include <QStringList>
-#include <QVariant>
+#include <boost/date_time/posix_time/posix_time.hpp>
+#include <odb/exception.hxx>
+#include <odb/pgsql/database.hxx>
+#include <odb/pgsql/exceptions.hxx>
+#include <odb/schema-catalog.hxx>
+#include <odb/transaction.hxx>
+#include <vector>
 
 namespace {
-    const char* kConnectionName = "graphing_server_pg_database";
-}
+    FailableOperationResult internalError(const QString& message) {
+        return FailableOperationResult::error(
+            static_cast<int>(GraphingErrorCode::InternalError),
+            message
+        );
+    }
 
-PgDatabase::PgDatabase() {
-    if (QSqlDatabase::contains(kConnectionName)) {
-        this->database = QSqlDatabase::database(kConnectionName);
-    } else {
-        this->database = QSqlDatabase::addDatabase("QPSQL", kConnectionName);
+    QString odbErrorMessage(const QString& prefix, const odb::exception& error) {
+        return QString("%1: %2").arg(prefix, QString::fromUtf8(error.what()));
+    }
+
+    boost::posix_time::ptime currentTimestamp() {
+        return boost::posix_time::microsec_clock::universal_time();
     }
 }
+
+PgDatabase::PgDatabase()
+{
+}
+
+PgDatabase::~PgDatabase() = default;
 
 QString PgDatabase::getEnvValue(const char* primaryName, const char* fallbackName) const {
     QString value = qEnvironmentVariable(primaryName);
@@ -36,96 +54,107 @@ QString PgDatabase::getEnvValue(const char* primaryName, const char* fallbackNam
     return "";
 }
 
+std::string PgDatabase::toStdString(const QString& value) const {
+    QByteArray bytes = value.toUtf8();
+    return std::string(bytes.constData(), static_cast<std::size_t>(bytes.size()));
+}
+
+QString PgDatabase::fromStdString(const std::string& value) const {
+    return QString::fromUtf8(value.data(), static_cast<int>(value.size()));
+}
+
 FailableOperationResult PgDatabase::ensureConnectionAlive() {
-    if (!this->database.isOpen()) {
-        return FailableOperationResult::error(
-            (int)GraphingErrorCode::InternalError,
-            "Database connection is not open"
-        );
+    if (!this->database) {
+        return internalError("Database connection is not configured");
     }
 
-    QSqlQuery query(this->database);
-    if (query.exec("SELECT 1") && query.next()) {
+    try {
+        odb::transaction transaction(this->database->begin());
+        this->database->query_value<DbBoolValue>("SELECT true");
+        transaction.commit();
         return FailableOperationResult::ok();
+    } catch (const odb::exception& error) {
+        this->database.reset();
+        return internalError(odbErrorMessage("Database connection became unusable", error));
     }
-
-    QString errorText = query.lastError().text();
-    this->database.close();
-    return FailableOperationResult::error(
-        (int)GraphingErrorCode::InternalError,
-        QString("Database connection became unusable: %1").arg(errorText)
-    );
 }
 
-FailableOperationResult PgDatabase::ensurePgCrypto() {
-    QSqlQuery query(this->database);
-    if (query.exec("CREATE EXTENSION IF NOT EXISTS pgcrypto")) {
-        return FailableOperationResult::ok();
-    }
+FailableOperationResult PgDatabase::ensureExistingSchemaCompatibility() {
+    try {
+        QStringList statements{
+            "ALTER TABLE public.password_reset_tokens DROP CONSTRAINT IF EXISTS password_reset_tokens_user_id_key",
+            "ALTER TABLE public.password_reset_tokens ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMP NULL",
+            "ALTER TABLE public.password_reset_tokens ADD COLUMN IF NOT EXISTS replaced_at TIMESTAMP NULL",
+            "ALTER TABLE public.password_reset_tokens ADD COLUMN IF NOT EXISTS used_at TIMESTAMP NULL",
+            "ALTER TABLE public.password_reset_tokens ADD COLUMN IF NOT EXISTS email_failed_at TIMESTAMP NULL",
+            "ALTER TABLE public.password_reset_tokens ADD COLUMN IF NOT EXISTS failure_message TEXT NULL",
+            "DO $$ "
+            "DECLARE column_to_convert TEXT; "
+            "BEGIN "
+            "FOREACH column_to_convert IN ARRAY ARRAY['verified_at', 'expires_at', 'created_at', 'cancelled_at', 'replaced_at', 'used_at', 'email_failed_at'] LOOP "
+            "IF EXISTS ("
+            "SELECT 1 FROM information_schema.columns c "
+            "WHERE table_schema = 'public' "
+            "AND table_name = 'password_reset_tokens' "
+            "AND c.column_name = column_to_convert "
+            "AND data_type = 'timestamp with time zone'"
+            ") THEN "
+            "EXECUTE format("
+            "'ALTER TABLE public.password_reset_tokens ALTER COLUMN %I TYPE TIMESTAMP USING %I AT TIME ZONE ''UTC'''"
+            ", column_to_convert, column_to_convert); "
+            "END IF; "
+            "END LOOP; "
+            "END $$",
+            "CREATE UNIQUE INDEX IF NOT EXISTS password_reset_tokens_one_active_per_user "
+            "ON public.password_reset_tokens (user_id) "
+            "WHERE cancelled_at IS NULL "
+            "AND replaced_at IS NULL "
+            "AND used_at IS NULL "
+            "AND email_failed_at IS NULL",
+            "CREATE INDEX IF NOT EXISTS password_reset_tokens_user_id_created_at_idx "
+            "ON public.password_reset_tokens (user_id, created_at DESC)",
+            "DROP FUNCTION IF EXISTS public.cleanup_expired_password_reset_tokens_job()"
+        };
 
-    return FailableOperationResult::error(
-        (int)GraphingErrorCode::InternalError,
-        QString("Cannot enable pgcrypto: %1").arg(query.lastError().text())
-    );
-}
-
-FailableOperationResult PgDatabase::ensurePasswordResetSchema() {
-    QStringList statements{
-        "CREATE TABLE IF NOT EXISTS public.password_reset_tokens ("
-        "id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, "
-        "user_id BIGINT NOT NULL REFERENCES public.users(id) ON DELETE CASCADE, "
-        "token_hash TEXT NOT NULL UNIQUE, "
-        "verification_code_hash TEXT NOT NULL, "
-        "verified_at TIMESTAMPTZ NULL, "
-        "expires_at TIMESTAMPTZ NOT NULL, "
-        "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), "
-        "cancelled_at TIMESTAMPTZ NULL, "
-        "replaced_at TIMESTAMPTZ NULL, "
-        "used_at TIMESTAMPTZ NULL, "
-        "email_failed_at TIMESTAMPTZ NULL, "
-        "failure_message TEXT NULL, "
-        "CONSTRAINT password_reset_tokens_token_hash_not_blank CHECK (btrim(token_hash) <> ''), "
-        "CONSTRAINT password_reset_tokens_verification_code_hash_not_blank CHECK (btrim(verification_code_hash) <> '')"
-        ")",
-        "ALTER TABLE public.password_reset_tokens DROP CONSTRAINT IF EXISTS password_reset_tokens_user_id_key",
-        "ALTER TABLE public.password_reset_tokens ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMPTZ NULL",
-        "ALTER TABLE public.password_reset_tokens ADD COLUMN IF NOT EXISTS replaced_at TIMESTAMPTZ NULL",
-        "ALTER TABLE public.password_reset_tokens ADD COLUMN IF NOT EXISTS used_at TIMESTAMPTZ NULL",
-        "ALTER TABLE public.password_reset_tokens ADD COLUMN IF NOT EXISTS email_failed_at TIMESTAMPTZ NULL",
-        "ALTER TABLE public.password_reset_tokens ADD COLUMN IF NOT EXISTS failure_message TEXT NULL",
-        "CREATE UNIQUE INDEX IF NOT EXISTS password_reset_tokens_one_active_per_user "
-        "ON public.password_reset_tokens (user_id) "
-        "WHERE cancelled_at IS NULL "
-        "AND replaced_at IS NULL "
-        "AND used_at IS NULL "
-        "AND email_failed_at IS NULL",
-        "CREATE INDEX IF NOT EXISTS password_reset_tokens_user_id_created_at_idx "
-        "ON public.password_reset_tokens (user_id, created_at DESC)"
-    };
-
-    QSqlQuery query(this->database);
-    for (QStringList::const_iterator it = statements.begin(); it != statements.end(); ++it) {
-        if (!query.exec(*it)) {
-            return FailableOperationResult::error(
-                (int)GraphingErrorCode::InternalError,
-                QString("Cannot ensure password reset schema: %1").arg(query.lastError().text())
-            );
+        for (QStringList::const_iterator it = statements.begin(); it != statements.end(); ++it) {
+            this->database->execute(this->toStdString(*it));
         }
-    }
 
-    return FailableOperationResult::ok();
+        return FailableOperationResult::ok();
+    } catch (const odb::exception& error) {
+        return internalError(odbErrorMessage("Cannot ensure existing database schema compatibility", error));
+    }
 }
 
-FailableOperationResult PgDatabase::dropLegacyPasswordResetCleanupFunction() {
-    QSqlQuery query(this->database);
-    if (query.exec("DROP FUNCTION IF EXISTS public.cleanup_expired_password_reset_tokens_job()")) {
-        return FailableOperationResult::ok();
+FailableOperationResult PgDatabase::ensureSchema() {
+    if (!this->database) {
+        return internalError("Database connection is not configured");
     }
 
-    return FailableOperationResult::error(
-        (int)GraphingErrorCode::InternalError,
-        QString("Cannot drop legacy password reset cleanup function: %1").arg(query.lastError().text())
-    );
+    try {
+        odb::transaction transaction(this->database->begin());
+        this->database->execute("CREATE EXTENSION IF NOT EXISTS pgcrypto");
+
+        DbSchemaState schemaState = this->database->query_value<DbSchemaState>(
+            "SELECT "
+            "to_regclass('public.users') IS NOT NULL, "
+            "to_regclass('public.password_reset_tokens') IS NOT NULL"
+        );
+
+        if (!schemaState.usersExists && !schemaState.passwordResetTokensExists) {
+            odb::schema_catalog::create_schema(*this->database, "", false);
+        }
+
+        FailableOperationResult compatibilityResult = this->ensureExistingSchemaCompatibility();
+        if (!compatibilityResult.success) {
+            return compatibilityResult;
+        }
+
+        transaction.commit();
+        return FailableOperationResult::ok();
+    } catch (const odb::exception& error) {
+        return internalError(odbErrorMessage("Cannot ensure database schema", error));
+    }
 }
 
 QString PgDatabase::generateResetToken() const {
@@ -146,8 +175,24 @@ QString PgDatabase::generateVerificationCode() const {
     return QString("%1").arg(QRandomGenerator::system()->bounded(1000000), 6, 10, QLatin1Char('0'));
 }
 
+FailableOperationResult PgDatabase::hashWithPgCrypto(const QString& value, QString* hash, const QString& errorPrefix) {
+    try {
+        typedef odb::query<DbStringValue> Query;
+        odb::transaction transaction(this->database->begin());
+        DbStringValue hashedValue = this->database->query_value<DbStringValue>(
+            "SELECT crypt(" + Query::_val(this->toStdString(value)) + ", gen_salt('bf', 12))"
+        );
+        transaction.commit();
+
+        *hash = this->fromStdString(hashedValue.value);
+        return FailableOperationResult::ok();
+    } catch (const odb::exception& error) {
+        return internalError(odbErrorMessage(errorPrefix, error));
+    }
+}
+
 FailableOperationResult PgDatabase::connect() {
-    if (this->database.isOpen()) {
+    if (this->database) {
         FailableOperationResult connectionAliveResult = this->ensureConnectionAlive();
         if (connectionAliveResult.success) {
             return FailableOperationResult::ok();
@@ -167,63 +212,46 @@ FailableOperationResult PgDatabase::connect() {
     }
 
     if (hostName.isEmpty() || portValue.isEmpty() || databaseName.isEmpty() || userName.isEmpty() || password.isEmpty()) {
-        return FailableOperationResult::error(
-            (int)GraphingErrorCode::InternalError,
-            "Database connection env is incomplete; expected DB_HOST/DB_PORT/DB_NAME/DB_USER/DB_PASSWORD"
-        );
+        return internalError("Database connection env is incomplete; expected DB_HOST/DB_PORT/DB_NAME/DB_USER/DB_PASSWORD");
     }
 
     bool portOk = false;
-    int port = portValue.toInt(&portOk);
+    unsigned int port = portValue.toUInt(&portOk);
     if (!portOk) {
-        return FailableOperationResult::error(
-            (int)GraphingErrorCode::InternalError,
-            QString("Invalid DB_PORT value: %1").arg(portValue)
-        );
+        return internalError(QString("Invalid DB_PORT value: %1").arg(portValue));
     }
 
-    this->database.setHostName(hostName);
-    this->database.setPort(port);
-    this->database.setDatabaseName(databaseName);
-    this->database.setUserName(userName);
-    this->database.setPassword(password);
-    this->database.setConnectOptions(
-        QString("sslmode=%1;").arg(sslMode) +
-        "connect_timeout=10;"
-        "keepalives=1;"
-        "keepalives_idle=30;"
-        "keepalives_interval=10;"
+    QString extraConnectionInfo = QString(
+        "sslmode=%1 "
+        "connect_timeout=10 "
+        "keepalives=1 "
+        "keepalives_idle=30 "
+        "keepalives_interval=10 "
         "keepalives_count=3"
-    );
+    ).arg(sslMode);
 
-    if (!this->database.open()) {
-        return FailableOperationResult::error(
-            (int)GraphingErrorCode::InternalError,
+    try {
+        this->database.reset(new odb::pgsql::database(
+            this->toStdString(userName),
+            this->toStdString(password),
+            this->toStdString(databaseName),
+            this->toStdString(hostName),
+            port,
+            this->toStdString(extraConnectionInfo)
+        ));
+
+        return this->ensureSchema();
+    } catch (const odb::exception& error) {
+        this->database.reset();
+        return internalError(
             QString("Cannot connect to PostgreSQL %1:%2/%3 as %4: %5")
                 .arg(hostName)
                 .arg(port)
                 .arg(databaseName)
                 .arg(userName)
-                .arg(this->database.lastError().text())
+                .arg(QString::fromUtf8(error.what()))
         );
     }
-
-    FailableOperationResult pgCryptoResult = this->ensurePgCrypto();
-    if (!pgCryptoResult.success) {
-        return pgCryptoResult;
-    }
-
-    FailableOperationResult passwordResetSchemaResult = this->ensurePasswordResetSchema();
-    if (!passwordResetSchemaResult.success) {
-        return passwordResetSchemaResult;
-    }
-
-    FailableOperationResult legacyCleanupResult = this->dropLegacyPasswordResetCleanupFunction();
-    if (!legacyCleanupResult.success) {
-        return legacyCleanupResult;
-    }
-
-    return FailableOperationResult::ok();
 }
 
 PgDatabase& PgDatabase::instance() {
@@ -237,90 +265,15 @@ FailableOperationResult PgDatabase::sync() {
         return connectionResult;
     }
 
-    if (!this->database.transaction()) {
-        return FailableOperationResult::error(
-            (int)GraphingErrorCode::InternalError,
-            QString("Cannot start sync transaction: %1").arg(this->database.lastError().text())
-        );
+    try {
+        odb::transaction transaction(this->database->begin());
+        this->database->execute("CREATE EXTENSION IF NOT EXISTS pgcrypto");
+        odb::schema_catalog::create_schema(*this->database);
+        transaction.commit();
+        return FailableOperationResult::ok();
+    } catch (const odb::exception& error) {
+        return internalError(odbErrorMessage("Cannot sync database schema", error));
     }
-
-    QSqlQuery cleanupQuery(this->database);
-    if (!cleanupQuery.exec(
-        "SELECT format('DROP TABLE IF EXISTS public.%I CASCADE', tablename) "
-        "FROM pg_tables "
-        "WHERE schemaname = 'public'"
-    )) {
-        this->database.rollback();
-        return FailableOperationResult::error(
-            (int)GraphingErrorCode::InternalError,
-            QString("Cannot prepare sync cleanup: %1").arg(cleanupQuery.lastError().text())
-        );
-    }
-
-    QStringList statements;
-    while (cleanupQuery.next()) {
-        statements.append(cleanupQuery.value(0).toString());
-    }
-
-    statements.append(QStringList{
-        "CREATE EXTENSION IF NOT EXISTS pgcrypto",
-        "CREATE TABLE public.users ("
-        "id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, "
-        "email TEXT NOT NULL UNIQUE, "
-        "password_hash TEXT NOT NULL, "
-        "name TEXT NOT NULL, "
-        "login TEXT NOT NULL UNIQUE, "
-        "CONSTRAINT users_email_not_blank CHECK (btrim(email) <> ''), "
-        "CONSTRAINT users_password_hash_not_blank CHECK (btrim(password_hash) <> ''), "
-        "CONSTRAINT users_name_not_blank CHECK (btrim(name) <> ''), "
-        "CONSTRAINT users_login_not_blank CHECK (btrim(login) <> '')"
-        ")",
-        "CREATE TABLE public.password_reset_tokens ("
-        "id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, "
-        "user_id BIGINT NOT NULL REFERENCES public.users(id) ON DELETE CASCADE, "
-        "token_hash TEXT NOT NULL UNIQUE, "
-        "verification_code_hash TEXT NOT NULL, "
-        "verified_at TIMESTAMPTZ NULL, "
-        "expires_at TIMESTAMPTZ NOT NULL, "
-        "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), "
-        "cancelled_at TIMESTAMPTZ NULL, "
-        "replaced_at TIMESTAMPTZ NULL, "
-        "used_at TIMESTAMPTZ NULL, "
-        "email_failed_at TIMESTAMPTZ NULL, "
-        "failure_message TEXT NULL, "
-        "CONSTRAINT password_reset_tokens_token_hash_not_blank CHECK (btrim(token_hash) <> ''), "
-        "CONSTRAINT password_reset_tokens_verification_code_hash_not_blank CHECK (btrim(verification_code_hash) <> '')"
-        ")",
-        "CREATE UNIQUE INDEX password_reset_tokens_one_active_per_user "
-        "ON public.password_reset_tokens (user_id) "
-        "WHERE cancelled_at IS NULL "
-        "AND replaced_at IS NULL "
-        "AND used_at IS NULL "
-        "AND email_failed_at IS NULL",
-        "CREATE INDEX password_reset_tokens_user_id_created_at_idx "
-        "ON public.password_reset_tokens (user_id, created_at DESC)"
-    });
-
-    QSqlQuery query(this->database);
-    for (QStringList::const_iterator it = statements.begin(); it != statements.end(); ++it) {
-        if (!query.exec(*it)) {
-            this->database.rollback();
-            return FailableOperationResult::error(
-                (int)GraphingErrorCode::InternalError,
-                QString("Sync query failed: %1").arg(query.lastError().text())
-            );
-        }
-    }
-
-    if (!this->database.commit()) {
-        this->database.rollback();
-        return FailableOperationResult::error(
-            (int)GraphingErrorCode::InternalError,
-            QString("Cannot commit sync transaction: %1").arg(this->database.lastError().text())
-        );
-    }
-
-    return this->dropLegacyPasswordResetCleanupFunction();
 }
 
 FailableOperationResult PgDatabase::login(const QString& login, const QString& password) {
@@ -329,31 +282,28 @@ FailableOperationResult PgDatabase::login(const QString& login, const QString& p
         return connectionResult;
     }
 
-    QSqlQuery query(this->database);
-    query.prepare(
-        "SELECT password_hash = crypt(:password, password_hash) "
-        "FROM public.users "
-        "WHERE login = :login"
-    );
-    query.bindValue(":login", login);
-    query.bindValue(":password", password);
+    try {
+        typedef odb::query<DbBoolValue> Query;
+        odb::transaction transaction(this->database->begin());
+        std::unique_ptr<DbBoolValue> passwordCheck(this->database->query_one<DbBoolValue>(
+            "SELECT password_hash = crypt(" + Query::_val(this->toStdString(password)) + ", password_hash) "
+            "FROM users "
+            "WHERE login = " + Query::_val(this->toStdString(login))
+        ));
 
-    if (!query.exec()) {
-        return FailableOperationResult::error(
-            (int)GraphingErrorCode::InternalError,
-            QString("Login query failed: %1").arg(query.lastError().text())
-        );
+        if (!passwordCheck) {
+            return FailableOperationResult::error((int)GraphingErrorCode::Forbidden, "User with this login was not found");
+        }
+
+        if (!passwordCheck->value) {
+            return FailableOperationResult::error((int)GraphingErrorCode::Forbidden, "Incorrect password");
+        }
+
+        transaction.commit();
+        return FailableOperationResult::ok();
+    } catch (const odb::exception& error) {
+        return internalError(odbErrorMessage("Login query failed", error));
     }
-
-    if (!query.next()) {
-        return FailableOperationResult::error((int)GraphingErrorCode::Forbidden, "User with this login was not found");
-    }
-
-    if (!query.value(0).toBool()) {
-        return FailableOperationResult::error((int)GraphingErrorCode::Forbidden, "Incorrect password");
-    }
-
-    return FailableOperationResult::ok();
 }
 
 FailableOperationResult PgDatabase::registerUser(const QString& login, const QString& password, const QString& name, const QString& email) {
@@ -366,32 +316,35 @@ FailableOperationResult PgDatabase::registerUser(const QString& login, const QSt
         return FailableOperationResult::error((int)GraphingErrorCode::BadRequest, "Password cannot be blank");
     }
 
-    QSqlQuery query(this->database);
-    query.prepare(
-        "INSERT INTO public.users (email, password_hash, name, login) "
-        "VALUES (:email, crypt(:password, gen_salt('bf', 12)), :name, :login)"
-    );
-    query.bindValue(":email", email);
-    query.bindValue(":password", password);
-    query.bindValue(":name", name);
-    query.bindValue(":login", login);
+    try {
+        QString passwordHash;
+        FailableOperationResult hashResult = this->hashWithPgCrypto(password, &passwordHash, "Cannot hash registration password");
+        if (!hashResult.success) {
+            return hashResult;
+        }
 
-    if (query.exec()) {
+        odb::transaction transaction(this->database->begin());
+        DbUser user(
+            this->toStdString(login),
+            this->toStdString(passwordHash),
+            this->toStdString(name),
+            this->toStdString(email)
+        );
+        this->database->persist(user);
+        transaction.commit();
         return FailableOperationResult::ok();
-    }
+    } catch (const odb::pgsql::database_exception& error) {
+        if (error.sqlstate() == "23505") {
+            return FailableOperationResult::error((int)GraphingErrorCode::Conflict, "User with this login or email already exists");
+        }
+        if (error.sqlstate() == "23514") {
+            return FailableOperationResult::error((int)GraphingErrorCode::BadRequest, "Registration fields cannot be blank");
+        }
 
-    QString nativeCode = query.lastError().nativeErrorCode();
-    if (nativeCode == "23505") {
-        return FailableOperationResult::error((int)GraphingErrorCode::Conflict, "User with this login or email already exists");
+        return internalError(odbErrorMessage("Registration query failed", error));
+    } catch (const odb::exception& error) {
+        return internalError(odbErrorMessage("Registration query failed", error));
     }
-    if (nativeCode == "23514") {
-        return FailableOperationResult::error((int)GraphingErrorCode::BadRequest, "Registration fields cannot be blank");
-    }
-
-    return FailableOperationResult::error(
-        (int)GraphingErrorCode::InternalError,
-        QString("Registration query failed: %1").arg(query.lastError().text())
-    );
 }
 
 PasswordResetCreationResult PgDatabase::createPasswordReset(const QString& loginOrEmail) {
@@ -411,99 +364,90 @@ PasswordResetCreationResult PgDatabase::createPasswordReset(const QString& login
         return result;
     }
 
-    QSqlQuery userQuery(this->database);
-    userQuery.prepare(
-        "SELECT id, email, name "
-        "FROM public.users "
-        "WHERE login = :login OR email = :email "
-        "LIMIT 1"
-    );
-    userQuery.bindValue(":login", loginOrEmail);
-    userQuery.bindValue(":email", loginOrEmail);
+    try {
+        typedef odb::query<DbUser> UserQuery;
+        std::unique_ptr<DbUser> user;
+        {
+            odb::transaction transaction(this->database->begin());
+            user.reset(this->database->query_one<DbUser>(
+                UserQuery::login == this->toStdString(loginOrEmail) ||
+                UserQuery::email == this->toStdString(loginOrEmail)
+            ));
+            transaction.commit();
+        }
 
-    if (!userQuery.exec()) {
-        result.operation = FailableOperationResult::error(
-            (int)GraphingErrorCode::InternalError,
-            QString("Password reset lookup failed: %1").arg(userQuery.lastError().text())
+        if (!user) {
+            result.operation = FailableOperationResult::error(
+                (int)GraphingErrorCode::BadRequest,
+                "User with this login or email was not found"
+            );
+            return result;
+        }
+
+        result.email = this->fromStdString(user->email());
+        result.name = this->fromStdString(user->name());
+        result.token = this->generateResetToken();
+        result.verificationCode = this->generateVerificationCode();
+
+        QString tokenHash;
+        FailableOperationResult tokenHashResult = this->hashWithPgCrypto(result.token, &tokenHash, "Cannot hash password reset token");
+        if (!tokenHashResult.success) {
+            result.operation = tokenHashResult;
+            return result;
+        }
+
+        QString verificationCodeHash;
+        FailableOperationResult codeHashResult = this->hashWithPgCrypto(
+            result.verificationCode,
+            &verificationCodeHash,
+            "Cannot hash password reset verification code"
         );
+        if (!codeHashResult.success) {
+            result.operation = codeHashResult;
+            return result;
+        }
+
+        odb::transaction transaction(this->database->begin());
+        typedef odb::query<DbPasswordResetToken> TokenQuery;
+        typedef odb::result<DbPasswordResetToken> TokenResult;
+
+        std::vector<unsigned long long> activeTokenIds;
+        TokenResult activeTokens = this->database->query<DbPasswordResetToken>(
+            TokenQuery::userId == user->id() &&
+            TokenQuery::cancelledAt.is_null() &&
+            TokenQuery::replacedAt.is_null() &&
+            TokenQuery::usedAt.is_null() &&
+            TokenQuery::emailFailedAt.is_null()
+        );
+        for (TokenResult::iterator it = activeTokens.begin(); it != activeTokens.end(); ++it) {
+            activeTokenIds.push_back(it->id());
+        }
+
+        boost::posix_time::ptime now = currentTimestamp();
+        for (std::vector<unsigned long long>::const_iterator it = activeTokenIds.begin(); it != activeTokenIds.end(); ++it) {
+            std::unique_ptr<DbPasswordResetToken> activeToken(this->database->find<DbPasswordResetToken>(*it));
+            if (activeToken) {
+                activeToken->markReplaced(now);
+                this->database->update(*activeToken);
+            }
+        }
+
+        DbPasswordResetToken token(
+            user->id(),
+            this->toStdString(tokenHash),
+            this->toStdString(verificationCodeHash),
+            now,
+            now + boost::posix_time::hours(24)
+        );
+        this->database->persist(token);
+        transaction.commit();
+
+        result.operation = FailableOperationResult::ok();
+        return result;
+    } catch (const odb::exception& error) {
+        result.operation = internalError(odbErrorMessage("Cannot create password reset token", error));
         return result;
     }
-
-    if (!userQuery.next()) {
-        result.operation = FailableOperationResult::error(
-            (int)GraphingErrorCode::BadRequest,
-            "User with this login or email was not found"
-        );
-        return result;
-    }
-
-    qlonglong userId = userQuery.value(0).toLongLong();
-    result.email = userQuery.value(1).toString();
-    result.name = userQuery.value(2).toString();
-    result.token = this->generateResetToken();
-    result.verificationCode = this->generateVerificationCode();
-
-    if (!this->database.transaction()) {
-        result.operation = FailableOperationResult::error(
-            (int)GraphingErrorCode::InternalError,
-            QString("Cannot start password reset transaction: %1").arg(this->database.lastError().text())
-        );
-        return result;
-    }
-
-    QSqlQuery replaceExistingQuery(this->database);
-    replaceExistingQuery.prepare(
-        "UPDATE public.password_reset_tokens "
-        "SET replaced_at = NOW() "
-        "WHERE user_id = :user_id "
-        "AND cancelled_at IS NULL "
-        "AND replaced_at IS NULL "
-        "AND used_at IS NULL "
-        "AND email_failed_at IS NULL"
-    );
-    replaceExistingQuery.bindValue(":user_id", userId);
-    if (!replaceExistingQuery.exec()) {
-        this->database.rollback();
-        result.operation = FailableOperationResult::error(
-            (int)GraphingErrorCode::InternalError,
-            QString("Cannot replace active password reset token: %1").arg(replaceExistingQuery.lastError().text())
-        );
-        return result;
-    }
-
-    QSqlQuery insertQuery(this->database);
-    insertQuery.prepare(
-        "INSERT INTO public.password_reset_tokens (user_id, token_hash, verification_code_hash, expires_at) "
-        "VALUES ("
-        ":user_id, "
-        "crypt(:token, gen_salt('bf', 12)), "
-        "crypt(:verification_code, gen_salt('bf', 12)), "
-        "NOW() + INTERVAL '24 hours'"
-        ")"
-    );
-    insertQuery.bindValue(":user_id", userId);
-    insertQuery.bindValue(":token", result.token);
-    insertQuery.bindValue(":verification_code", result.verificationCode);
-    if (!insertQuery.exec()) {
-        this->database.rollback();
-        result.operation = FailableOperationResult::error(
-            (int)GraphingErrorCode::InternalError,
-            QString("Cannot create password reset token: %1").arg(insertQuery.lastError().text())
-        );
-        return result;
-    }
-
-    if (!this->database.commit()) {
-        this->database.rollback();
-        result.operation = FailableOperationResult::error(
-            (int)GraphingErrorCode::InternalError,
-            QString("Cannot commit password reset transaction: %1").arg(this->database.lastError().text())
-        );
-        return result;
-    }
-
-    result.operation = FailableOperationResult::ok();
-    return result;
 }
 
 FailableOperationResult PgDatabase::cancelPasswordReset(const QString& token, const QString& failureMessage) {
@@ -516,26 +460,32 @@ FailableOperationResult PgDatabase::cancelPasswordReset(const QString& token, co
         return FailableOperationResult::error((int)GraphingErrorCode::BadRequest, "Password reset token cannot be blank");
     }
 
-    QSqlQuery query(this->database);
-    query.prepare(
-        "UPDATE public.password_reset_tokens "
-        "SET cancelled_at = COALESCE(cancelled_at, NOW()), "
-        "email_failed_at = COALESCE(email_failed_at, NOW()), "
-        "failure_message = COALESCE(NULLIF(:failure_message, ''), failure_message) "
-        "WHERE token_hash = crypt(:token, token_hash) "
-        "AND replaced_at IS NULL "
-        "AND used_at IS NULL"
-    );
-    query.bindValue(":token", token);
-    query.bindValue(":failure_message", failureMessage);
-    if (!query.exec()) {
-        return FailableOperationResult::error(
-            (int)GraphingErrorCode::InternalError,
-            QString("Cannot cancel password reset token: %1").arg(query.lastError().text())
-        );
-    }
+    try {
+        typedef odb::query<DbIdValue> Query;
+        odb::transaction transaction(this->database->begin());
+        std::unique_ptr<DbIdValue> tokenId(this->database->query_one<DbIdValue>(
+            "SELECT id "
+            "FROM password_reset_tokens "
+            "WHERE token_hash = crypt(" + Query::_val(this->toStdString(token)) + ", token_hash) "
+            "AND replaced_at IS NULL "
+            "AND used_at IS NULL"
+        ));
 
-    return FailableOperationResult::ok();
+        if (!tokenId) {
+            transaction.commit();
+            return FailableOperationResult::ok();
+        }
+
+        std::unique_ptr<DbPasswordResetToken> passwordResetToken(this->database->find<DbPasswordResetToken>(tokenId->id));
+        if (passwordResetToken) {
+            passwordResetToken->markEmailDeliveryFailed(currentTimestamp(), this->toStdString(failureMessage));
+            this->database->update(*passwordResetToken);
+        }
+        transaction.commit();
+        return FailableOperationResult::ok();
+    } catch (const odb::exception& error) {
+        return internalError(odbErrorMessage("Cannot cancel password reset token", error));
+    }
 }
 
 FailableOperationResult PgDatabase::verifyPasswordReset(const QString& token, const QString& verificationCode) {
@@ -552,73 +502,48 @@ FailableOperationResult PgDatabase::verifyPasswordReset(const QString& token, co
         return FailableOperationResult::error((int)GraphingErrorCode::BadRequest, "Verification code cannot be blank");
     }
 
-    QSqlQuery stateQuery(this->database);
-    stateQuery.prepare(
-        "SELECT verified_at IS NOT NULL, "
-        "expires_at > NOW(), "
-        "verification_code_hash = crypt(:verification_code, verification_code_hash) "
-        "FROM public.password_reset_tokens "
-        "WHERE token_hash = crypt(:token, token_hash) "
-        "AND cancelled_at IS NULL "
-        "AND replaced_at IS NULL "
-        "AND used_at IS NULL "
-        "AND email_failed_at IS NULL"
-    );
-    stateQuery.bindValue(":token", token);
-    stateQuery.bindValue(":verification_code", verificationCode);
-    if (!stateQuery.exec()) {
-        return FailableOperationResult::error(
-            (int)GraphingErrorCode::InternalError,
-            QString("Cannot verify password reset token: %1").arg(stateQuery.lastError().text())
-        );
-    }
+    try {
+        typedef odb::query<DbPasswordResetVerificationState> Query;
+        odb::transaction transaction(this->database->begin());
+        std::unique_ptr<DbPasswordResetVerificationState> state(this->database->query_one<DbPasswordResetVerificationState>(
+            "SELECT id, "
+            "verified_at IS NOT NULL, "
+            "expires_at > CURRENT_TIMESTAMP, "
+            "verification_code_hash = crypt(" + Query::_val(this->toStdString(verificationCode)) + ", verification_code_hash) "
+            "FROM password_reset_tokens "
+            "WHERE token_hash = crypt(" + Query::_val(this->toStdString(token)) + ", token_hash) "
+            "AND cancelled_at IS NULL "
+            "AND replaced_at IS NULL "
+            "AND used_at IS NULL "
+            "AND email_failed_at IS NULL"
+        ));
 
-    if (!stateQuery.next()) {
-        return FailableOperationResult::error(
-            (int)GraphingErrorCode::BadRequest,
-            "Password reset token is invalid or expired"
-        );
-    }
+        if (!state || !state->notExpired) {
+            return FailableOperationResult::error(
+                (int)GraphingErrorCode::BadRequest,
+                "Password reset token is invalid or expired"
+            );
+        }
 
-    bool alreadyVerified = stateQuery.value(0).toBool();
-    bool notExpired = stateQuery.value(1).toBool();
-    bool codeMatches = stateQuery.value(2).toBool();
-    if (!notExpired) {
-        return FailableOperationResult::error(
-            (int)GraphingErrorCode::BadRequest,
-            "Password reset token is invalid or expired"
-        );
-    }
+        if (state->alreadyVerified) {
+            transaction.commit();
+            return FailableOperationResult::ok();
+        }
 
-    if (alreadyVerified) {
+        if (!state->codeMatches) {
+            return FailableOperationResult::error((int)GraphingErrorCode::Forbidden, "Incorrect verification code");
+        }
+
+        std::unique_ptr<DbPasswordResetToken> passwordResetToken(this->database->find<DbPasswordResetToken>(state->id));
+        if (passwordResetToken) {
+            passwordResetToken->markVerified(currentTimestamp());
+            this->database->update(*passwordResetToken);
+        }
+        transaction.commit();
         return FailableOperationResult::ok();
+    } catch (const odb::exception& error) {
+        return internalError(odbErrorMessage("Cannot verify password reset token", error));
     }
-
-    if (!codeMatches) {
-        return FailableOperationResult::error((int)GraphingErrorCode::Forbidden, "Incorrect verification code");
-    }
-
-    QSqlQuery updateQuery(this->database);
-    updateQuery.prepare(
-        "UPDATE public.password_reset_tokens "
-        "SET verified_at = NOW() "
-        "WHERE token_hash = crypt(:token, token_hash) "
-        "AND expires_at > NOW() "
-        "AND cancelled_at IS NULL "
-        "AND replaced_at IS NULL "
-        "AND used_at IS NULL "
-        "AND email_failed_at IS NULL "
-        "AND verified_at IS NULL"
-    );
-    updateQuery.bindValue(":token", token);
-    if (!updateQuery.exec()) {
-        return FailableOperationResult::error(
-            (int)GraphingErrorCode::InternalError,
-            QString("Cannot mark password reset token as verified: %1").arg(updateQuery.lastError().text())
-        );
-    }
-
-    return FailableOperationResult::ok();
 }
 
 FailableOperationResult PgDatabase::resetPassword(const QString& token, const QString& newPassword) {
@@ -635,93 +560,58 @@ FailableOperationResult PgDatabase::resetPassword(const QString& token, const QS
         return FailableOperationResult::error((int)GraphingErrorCode::BadRequest, "Password cannot be blank");
     }
 
-    if (!this->database.transaction()) {
-        return FailableOperationResult::error(
-            (int)GraphingErrorCode::InternalError,
-            QString("Cannot start password update transaction: %1").arg(this->database.lastError().text())
-        );
-    }
+    try {
+        QString newPasswordHash;
+        FailableOperationResult hashResult = this->hashWithPgCrypto(newPassword, &newPasswordHash, "Cannot hash new password");
+        if (!hashResult.success) {
+            return hashResult;
+        }
 
-    QSqlQuery tokenQuery(this->database);
-    tokenQuery.prepare(
-        "SELECT user_id, verified_at IS NOT NULL "
-        "FROM public.password_reset_tokens "
-        "WHERE token_hash = crypt(:token, token_hash) "
-        "AND expires_at > NOW() "
-        "AND cancelled_at IS NULL "
-        "AND replaced_at IS NULL "
-        "AND used_at IS NULL "
-        "AND email_failed_at IS NULL "
-        "FOR UPDATE"
-    );
-    tokenQuery.bindValue(":token", token);
-    if (!tokenQuery.exec()) {
-        this->database.rollback();
-        return FailableOperationResult::error(
-            (int)GraphingErrorCode::InternalError,
-            QString("Cannot load password reset token: %1").arg(tokenQuery.lastError().text())
-        );
-    }
+        odb::transaction transaction(this->database->begin());
+        typedef odb::query<DbPasswordResetUpdateState> Query;
+        std::unique_ptr<DbPasswordResetUpdateState> state(this->database->query_one<DbPasswordResetUpdateState>(
+            "SELECT id, user_id, verified_at IS NOT NULL "
+            "FROM password_reset_tokens "
+            "WHERE token_hash = crypt(" + Query::_val(this->toStdString(token)) + ", token_hash) "
+            "AND expires_at > CURRENT_TIMESTAMP "
+            "AND cancelled_at IS NULL "
+            "AND replaced_at IS NULL "
+            "AND used_at IS NULL "
+            "AND email_failed_at IS NULL "
+            "FOR UPDATE"
+        ));
 
-    if (!tokenQuery.next()) {
-        this->database.rollback();
-        return FailableOperationResult::error(
-            (int)GraphingErrorCode::BadRequest,
-            "Password reset token is invalid or expired"
-        );
-    }
+        if (!state) {
+            return FailableOperationResult::error(
+                (int)GraphingErrorCode::BadRequest,
+                "Password reset token is invalid or expired"
+            );
+        }
 
-    qlonglong userId = tokenQuery.value(0).toLongLong();
-    bool isVerified = tokenQuery.value(1).toBool();
-    if (!isVerified) {
-        this->database.rollback();
-        return FailableOperationResult::error(
-            (int)GraphingErrorCode::Forbidden,
-            "Password reset code is not verified"
-        );
-    }
+        if (!state->verified) {
+            return FailableOperationResult::error(
+                (int)GraphingErrorCode::Forbidden,
+                "Password reset code is not verified"
+            );
+        }
 
-    QSqlQuery updatePasswordQuery(this->database);
-    updatePasswordQuery.prepare(
-        "UPDATE public.users "
-        "SET password_hash = crypt(:password, gen_salt('bf', 12)) "
-        "WHERE id = :user_id"
-    );
-    updatePasswordQuery.bindValue(":password", newPassword);
-    updatePasswordQuery.bindValue(":user_id", userId);
-    if (!updatePasswordQuery.exec()) {
-        this->database.rollback();
-        return FailableOperationResult::error(
-            (int)GraphingErrorCode::InternalError,
-            QString("Cannot update password: %1").arg(updatePasswordQuery.lastError().text())
-        );
-    }
+        std::unique_ptr<DbUser> user(this->database->find<DbUser>(state->userId));
+        if (!user) {
+            return internalError("Password reset user was not found");
+        }
+        user->setPasswordHash(this->toStdString(newPasswordHash));
+        this->database->update(*user);
 
-    QSqlQuery markTokenUsedQuery(this->database);
-    markTokenUsedQuery.prepare(
-        "UPDATE public.password_reset_tokens "
-        "SET used_at = NOW() "
-        "WHERE token_hash = crypt(:token, token_hash) "
-        "AND user_id = :user_id "
-        "AND used_at IS NULL"
-    );
-    markTokenUsedQuery.bindValue(":token", token);
-    markTokenUsedQuery.bindValue(":user_id", userId);
-    if (!markTokenUsedQuery.exec()) {
-        this->database.rollback();
-        return FailableOperationResult::error(
-            (int)GraphingErrorCode::InternalError,
-            QString("Cannot mark password reset token as used: %1").arg(markTokenUsedQuery.lastError().text())
-        );
-    }
+        std::unique_ptr<DbPasswordResetToken> passwordResetToken(this->database->find<DbPasswordResetToken>(state->id));
+        if (!passwordResetToken) {
+            return internalError("Password reset token disappeared during update");
+        }
+        passwordResetToken->markUsed(currentTimestamp());
+        this->database->update(*passwordResetToken);
 
-    if (!this->database.commit()) {
-        this->database.rollback();
-        return FailableOperationResult::error(
-            (int)GraphingErrorCode::InternalError,
-            QString("Cannot commit password update transaction: %1").arg(this->database.lastError().text())
-        );
+        transaction.commit();
+        return FailableOperationResult::ok();
+    } catch (const odb::exception& error) {
+        return internalError(odbErrorMessage("Cannot update password", error));
     }
-
-    return FailableOperationResult::ok();
 }

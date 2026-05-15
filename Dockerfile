@@ -5,6 +5,10 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         build-essential \
+        libboost-date-time-dev \
+        libodb-boost-dev \
+        libodb-dev \
+        libodb-pgsql-dev \
         qt6-base-dev \
         qt6-base-dev-tools \
     && rm -rf /var/lib/apt/lists/*
@@ -28,10 +32,12 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
+        libboost-date-time1.83.0 \
+        libodb-2.4 \
+        libodb-boost-2.4t64 \
+        libodb-pgsql-2.4 \
         libqt6core6t64 \
         libqt6network6t64 \
-        libqt6sql6t64 \
-        libqt6sql6-psql \
         libstdc++6 \
     && rm -rf /var/lib/apt/lists/*
 

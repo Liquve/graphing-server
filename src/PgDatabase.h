@@ -1,9 +1,16 @@
 #ifndef PGDATABASE_H
 #define PGDATABASE_H
 
-#include <QSqlDatabase>
 #include <QString>
+#include <memory>
+#include <string>
 #include "FailableOperationResult.h"
+
+namespace odb {
+namespace pgsql {
+class database;
+}
+}
 
 struct PasswordResetCreationResult {
     FailableOperationResult operation;
@@ -16,17 +23,20 @@ struct PasswordResetCreationResult {
 class PgDatabase
 {
 private:
-    QSqlDatabase database;
+    std::unique_ptr<odb::pgsql::database> database;
 
     PgDatabase();
+    ~PgDatabase();
 
     QString getEnvValue(const char*, const char* = nullptr) const;
+    std::string toStdString(const QString&) const;
+    QString fromStdString(const std::string&) const;
     FailableOperationResult ensureConnectionAlive();
-    FailableOperationResult ensurePgCrypto();
-    FailableOperationResult ensurePasswordResetSchema();
-    FailableOperationResult dropLegacyPasswordResetCleanupFunction();
+    FailableOperationResult ensureSchema();
+    FailableOperationResult ensureExistingSchemaCompatibility();
     QString generateResetToken() const;
     QString generateVerificationCode() const;
+    FailableOperationResult hashWithPgCrypto(const QString&, QString*, const QString&);
 public:
     PgDatabase(const PgDatabase&) = delete;
     PgDatabase& operator=(const PgDatabase&) = delete;
