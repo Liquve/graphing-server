@@ -2,14 +2,14 @@ services:
   db:
     image: postgres:16
     environment:
-      POSTGRES_DB: ${APP_DB_NAME:-calc_db}
-      POSTGRES_USER: ${POSTGRES_SUPERUSER:-postgres}
-      POSTGRES_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD:-postgres_password}
-      APP_DB_NAME: ${APP_DB_NAME:-calc_db}
-      APP_DB_USER: ${APP_DB_USER:-calc_app}
-      APP_DB_PASSWORD: ${APP_DB_PASSWORD:-calc_app_password}
+      POSTGRES_DB: ${APP_DB_NAME:?APP_DB_NAME must be set in .env}
+      POSTGRES_USER: ${POSTGRES_SUPERUSER:?POSTGRES_SUPERUSER must be set in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD:?POSTGRES_SUPERUSER_PASSWORD must be set in .env}
+      APP_DB_NAME: ${APP_DB_NAME:?APP_DB_NAME must be set in .env}
+      APP_DB_USER: ${APP_DB_USER:?APP_DB_USER must be set in .env}
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD:?APP_DB_PASSWORD must be set in .env}
     ports:
-      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+      - "127.0.0.1:${POSTGRES_PORT:?POSTGRES_PORT must be set in .env}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./docker/db/init/001-init-graphing-server.sh:/docker-entrypoint-initdb.d/001-init-graphing-server.sh:ro
@@ -32,18 +32,18 @@ services:
     environment:
       DB_HOST: db
       DB_PORT: 5432
-      DB_NAME: ${APP_DB_NAME:-calc_db}
-      DB_USER: ${APP_DB_USER:-calc_app}
-      DB_PASSWORD: ${APP_DB_PASSWORD:-calc_app_password}
-      DB_SSLMODE: ${DB_SSLMODE:-disable}
-      MAIL_SERVICE_BASE_URL: ${MAIL_SERVICE_BASE_URL:-http://host.docker.internal:8025}
-      MAIL_SERVICE_FROM_USER: ${MAIL_SERVICE_FROM_USER:-admin}
-      MAIL_SERVICE_SENDER_ALIAS: ${MAIL_SERVICE_SENDER_ALIAS:-Graphing Server}
-      GRAPHING_CALCULATION_POINTS: ${GRAPHING_CALCULATION_POINTS:-1000}
+      DB_NAME: ${APP_DB_NAME:?APP_DB_NAME must be set in .env}
+      DB_USER: ${APP_DB_USER:?APP_DB_USER must be set in .env}
+      DB_PASSWORD: ${APP_DB_PASSWORD:?APP_DB_PASSWORD must be set in .env}
+      DB_SSLMODE: ${DB_SSLMODE:?DB_SSLMODE must be set in .env}
+      MAIL_SERVICE_BASE_URL: ${MAIL_SERVICE_BASE_URL:?MAIL_SERVICE_BASE_URL must be set in .env}
+      MAIL_SERVICE_FROM_USER: ${MAIL_SERVICE_FROM_USER:?MAIL_SERVICE_FROM_USER must be set in .env}
+      MAIL_SERVICE_SENDER_ALIAS: ${MAIL_SERVICE_SENDER_ALIAS:?MAIL_SERVICE_SENDER_ALIAS must be set in .env}
+      GRAPHING_CALCULATION_POINTS: ${GRAPHING_CALCULATION_POINTS:?GRAPHING_CALCULATION_POINTS must be set in .env}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
-      - "0.0.0.0:${SERVER_PORT:-13579}:13579"
+      - "0.0.0.0:${SERVER_PORT:?SERVER_PORT must be set in .env}:13579"
     healthcheck:
       test: ["CMD-SHELL", "timeout 3 bash -c '</dev/tcp/127.0.0.1/13579'"]
       interval: 5s
